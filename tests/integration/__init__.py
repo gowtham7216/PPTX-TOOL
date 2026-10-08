@@ -1,0 +1,3 @@
+"""
+SlideGuard Integration Tests Package.
+"""

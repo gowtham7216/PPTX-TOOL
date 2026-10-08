@@ -1,0 +1,517 @@
+"""
+SlideGuard Report Generator.
+Generates comprehensive Markdown and JSON reports detailing accessibility analysis,
+reading order sequences, remediation logs, quality scores, and integrity checks.
+"""
+
+import json
+from pathlib import Path
+from typing import Dict, Any
+from models.job import JobContext
+
+
+class ReportGenerator:
+    """Generates structured audit and verification reports for SlideGuard jobs."""
+
+    def generate_json_report(self, context: JobContext, output_file: Path) -> Path:
+        """Saves machine-readable audit report in JSON format."""
+        data = self._build_report_dict(context)
+        target = Path(output_file).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return target
+
+    def generate_markdown_report(self, context: JobContext, output_file: Path) -> Path:
+        """Generates human-readable Markdown accessibility and verification report."""
+        m = context.metrics
+        c = context.comparison_result
+        v = context.verification_result
+
+        md_lines = [
+            f"# SlideGuard Accessibility & Integrity Report",
+            f"",
+            f"**Job ID:** `{context.job_id}`  ",
+            f"**File Name:** `{context.original_file.name}`  ",
+            f"**Status:** `{context.stage.value}`  ",
+            f"**Execution Duration:** `{context.duration_seconds:.2f}s`  ",
+            f"",
+            f"---",
+            f"",
+            f"## 1. Executive Summary & Quality Metrics",
+            f"",
+            f"| Metric | Value |",
+            f"|---|---|",
+            f"| **Accessibility Quality Score** | **{m.accessibility_score:.1f} / 100** |",
+            f"| **Total Slides** | {context.total_slides} |",
+            f"| **Slides Analyzed** | {context.slides_analyzed} |",
+            f"| **Total Accessibility Issues** | {m.total_issues} |",
+            f"| - Critical | {m.critical_issues} |",
+            f"| - Error | {m.error_issues} |",
+            f"| - Warning | {m.warning_issues} |",
+            f"| - Info | {m.info_issues} |",
+            f"| **Rules Evaluated** | {m.total_rules_evaluated} |",
+            f"| - Rules Passed | {m.passed_rules} |",
+            f"| - Rules Failed | {m.failed_rules} |",
+            f"| - Rules Warning | {m.warning_rules} |",
+            f"| **Design Preservation Verified** | {'✅ Yes' if (c and c.integrity_preserved) else '⚠️ Not Verified'} |",
+            f"",
+            f"---",
+            f"",
+            f"## 2. Reading Order Analysis & Proposal",
+            f"",
+        ]
+
+        # Extract reading order issues
+        ro_issues = []
+        for res in context.rule_results:
+            if res.rule_id == "SG-RO-01":
+                ro_issues.extend(res.issues)
+
+        if not ro_issues:
+            md_lines.append("All slide reading sequences are logically compliant; no reordering required.\n")
+        else:
+            md_lines.extend([
+                f"| Slide # | Confidence | Original Order | Proposed Order | Footers Excluded | Reasoning |",
+                f"|---|---|---|---|---|---|",
+            ])
+            for issue in ro_issues:
+                extra = issue.extra_data or {}
+                orig = extra.get("original_order", [])
+                prop = extra.get("proposed_order", [])
+                conf = extra.get("confidence", "MEDIUM")
+                footers = extra.get("excluded_footer_objects", [])
+                reasons = extra.get("reasoning", [])
+
+                f_desc = ", ".join(f"Shape {f['shape_id']} ({f.get('text', '')[:15]})" for f in footers) if footers else "None"
+                r_desc = "; ".join(reasons[:2]) if reasons else issue.description
+
+                md_lines.append(
+                    f"| {issue.slide_number} | **{conf}** | `{orig}` | `{prop}` | {f_desc} | {r_desc} |"
+                )
+            md_lines.append("")
+
+        md_lines.extend([
+            f"---",
+            f"",
+            f"## 3. Selective Ungrouping & Hierarchy Analysis",
+            f"",
+        ])
+
+        # Extract ungrouping issues
+        grp_issues = []
+        for res in context.rule_results:
+            if res.rule_id == "SG-GRP-01":
+                grp_issues.extend(res.issues)
+
+        if not grp_issues:
+            md_lines.append("No grouped objects requiring ungrouping detected in this presentation.\n")
+        else:
+            md_lines.extend([
+                f"| Slide # | Group ID | Category | Eligible Text/Shapes | Protected Pictures | Safety Status | Proposed Action |",
+                f"|---|---|---|---|---|---|---|",
+            ])
+            for issue in grp_issues:
+                extra = issue.extra_data or {}
+                grp_id = issue.shape_id or extra.get("group_id", "N/A")
+                cat = extra.get("category", "MIXED")
+                el_cnt = extra.get("eligible_count", 0)
+                pic_cnt = extra.get("picture_count", 0)
+                is_safe = extra.get("is_safe_to_remediate", True)
+                safety = "✅ Safe to Ungroup" if is_safe else f"⚠️ Preserved ({extra.get('skip_reason', 'Manual')})"
+                action = f"Extract {el_cnt} text/shape(s); protect {pic_cnt} picture(s)" if is_safe else "Preserve group container intact"
+
+                md_lines.append(
+                    f"| {issue.slide_number} | `{grp_id}` | `{cat}` | {el_cnt} | {pic_cnt} | {safety} | {action} |"
+                )
+            md_lines.append("")
+
+        md_lines.extend([
+            f"---",
+            f"",
+            f"## 4. Placeholder Conversion & Analysis",
+            f"",
+        ])
+
+        # Extract placeholder issues
+        ph_issues = []
+        for res in context.rule_results:
+            if res.rule_id == "SG-PH-01":
+                ph_issues.extend(res.issues)
+
+        if not ph_issues:
+            md_lines.append("All slide placeholders are structurally compliant; no conversions required.\n")
+        else:
+            md_lines.extend([
+                f"| Slide # | Shape ID | Name | Category | Status | Inherited From | Proposed Action / Reason |",
+                f"|---|---|---|---|---|---|---|",
+            ])
+            for issue in ph_issues:
+                extra = issue.extra_data or {}
+                s_id = issue.shape_id or extra.get("shape_id", "N/A")
+                s_name = issue.shape_name or extra.get("shape_name", "Shape")
+                cat = extra.get("category", "OTHER")
+                st = extra.get("status", "PRESERVED")
+                inh = extra.get("inherited_from", "slide")
+                reason = extra.get("reason", issue.description)
+                rec = extra.get("recommendation", issue.recommendation)
+                status_icon = "✅ Safe to Convert" if st == "SAFE_TO_CONVERT" else ("⚠️ Manual Review" if st == "MANUAL_REVIEW" else "🛡️ Preserved")
+                action_text = rec if st == "SAFE_TO_CONVERT" else reason
+
+                md_lines.append(
+                    f"| {issue.slide_number} | `{s_id}` | {s_name} | `{cat}` | {status_icon} | {inh} | {action_text} |"
+                )
+            md_lines.append("")
+
+        md_lines.extend([
+            f"---",
+            f"",
+            f"## 5. List Semantics & Numbering",
+            f"",
+        ])
+
+        # Extract list issues
+        lst_issues = []
+        for res in context.rule_results:
+            if res.rule_id == "SG-LST-01":
+                lst_issues.extend(res.issues)
+
+        if not lst_issues:
+            md_lines.append("All slide text structures comply with native list semantics; no list remediation required.\n")
+        else:
+            md_lines.extend([
+                f"| Slide # | Shape ID | Paragraph | Category | Status | Confidence | Proposed Action / Reason |",
+                f"|---|---|---|---|---|---|---|",
+            ])
+            for issue in lst_issues:
+                extra = issue.extra_data or {}
+                s_id = issue.shape_id or extra.get("shape_id", "N/A")
+                p_idx = extra.get("paragraph_index", 0) + 1
+                cat = extra.get("category", "NONE")
+                st = extra.get("status", "NOT_A_LIST")
+                conf = extra.get("confidence", "HIGH")
+                act = extra.get("proposed_action", issue.recommendation)
+                status_icon = "✅ Safe to Remediate" if st == "SAFE_TO_REMEDIATE" else ("⚠️ Manual Review" if st == "MANUAL_REVIEW" else "🛡️ Valid")
+
+                md_lines.append(
+                    f"| {issue.slide_number} | `{s_id}` | P{p_idx} | `{cat}` | {status_icon} | {conf} | {act} |"
+                )
+            md_lines.append("")
+
+        md_lines.extend([
+            f"---",
+            f"",
+            f"## 6. Accessibility Validation & Remediation",
+            f"",
+        ])
+
+        # Calculate accessibility validation metrics
+        total_rules = m.total_rules_evaluated
+        passed_rules = m.passed_rules
+        err_count = m.error_issues
+        warn_count = m.warning_issues
+        info_count = m.info_issues
+
+        all_issues = [issue for res in context.rule_results for issue in res.issues]
+        safe_auto_count = sum(1 for i in all_issues if i.behavior.value == "SAFE_AUTO_REMEDIATE" and getattr(i, "status", None) and (i.status.value == "SAFE_TO_REMEDIATE" or i.status == "SAFE_TO_REMEDIATE"))
+        manual_review_count = sum(1 for i in all_issues if getattr(i, "status", None) and (getattr(i.status, "value", str(i.status)) == "MANUAL_REVIEW"))
+        detect_only_count = sum(1 for i in all_issues if i.behavior.value == "DETECT_ONLY")
+        unsupported_count = sum(1 for i in all_issues if getattr(i, "status", None) and (getattr(i.status, "value", str(i.status)) == "UNSUPPORTED"))
+        remediation_failures = sum(1 for a in context.remediation_actions if a.status.value == "FAILED")
+
+        md_lines.extend([
+            f"| Metric | Count |",
+            f"|---|---|",
+            f"| **Total Rules Evaluated** | {total_rules} |",
+            f"| **Rules Passed** | {passed_rules} |",
+            f"| **Errors** | {err_count} |",
+            f"| **Warnings** | {warn_count} |",
+            f"| **Info** | {info_count} |",
+            f"| **Safe Auto-Remediations** | {safe_auto_count} |",
+            f"| **Manual-Review Items** | {manual_review_count} |",
+            f"| **Detect-Only Issues** | {detect_only_count} |",
+            f"| **Unsupported Cases** | {unsupported_count} |",
+            f"| **Remediation Failures** | {remediation_failures} |",
+            f"",
+        ])
+
+        if not all_issues:
+            md_lines.append("No accessibility violations detected in this presentation.\n")
+        else:
+            md_lines.extend([
+                f"| Slide | Shape | Rule ID & Name | Severity | WCAG Criterion | Description | Recommendation | Action / Status | Confidence | Verification |",
+                f"|---|---|---|---|---|---|---|---|---|---|",
+            ])
+            for issue in all_issues:
+                st_val = getattr(issue.status, "value", str(issue.status)) if hasattr(issue, "status") else "DETECTED"
+                conf_val = getattr(issue, "confidence", "HIGH")
+                verif_val = getattr(issue, "verification_status", "PENDING") or "PENDING"
+                shape_label = f"`{issue.shape_id}`" if issue.shape_id is not None else "Slide"
+
+                md_lines.append(
+                    f"| {issue.slide_number} | {shape_label} | `{issue.rule_id}` {issue.rule_name} | **{issue.severity.value}** | {issue.wcag_mapping or 'N/A'} | {issue.description} | {issue.recommendation} | `{st_val}` | {conf_val} | {verif_val} |"
+                )
+            md_lines.append("")
+
+        md_lines.extend([
+            f"---",
+            f"",
+            f"## 7. Accessibility Intelligence Summary",
+            f"",
+        ])
+
+        u_issues = context.unified_issues or []
+        intel_summary = context.intelligence_summary or {}
+        raw_issues_count = m.total_issues
+        correlated_count = len(u_issues)
+        dedup_count = max(0, raw_issues_count - correlated_count)
+        high_conf = sum(1 for u in u_issues if getattr(u.confidence, "value", str(u.confidence)) == "HIGH")
+        med_conf = sum(1 for u in u_issues if getattr(u.confidence, "value", str(u.confidence)) == "MEDIUM")
+        low_conf = sum(1 for u in u_issues if getattr(u.confidence, "value", str(u.confidence)) == "LOW")
+        safe_candidates = sum(1 for u in u_issues if getattr(u.remediation_eligibility, "value", str(u.remediation_eligibility)) == "ELIGIBLE_AUTO")
+
+        remediated_cnt = intel_summary.get("remediated_count", m.remediated_issues)
+        unresolved_cnt = intel_summary.get("unchanged_count", 0) + intel_summary.get("changed_count", 0) + intel_summary.get("manual_review_count", 0) if intel_summary else m.unresolved_issues
+        new_cnt = intel_summary.get("new_count", 0)
+        manual_rev_cnt = intel_summary.get("manual_review_count", m.manual_review_issues)
+        unsupported_cnt = intel_summary.get("unsupported_count", m.unsupported_issues)
+
+        score_before = f"{context.pre_remediation_score:.1f} / 100" if context.pre_remediation_score is not None else f"{m.quality_score_v2:.1f} / 100"
+        if context.post_remediation_score is not None:
+            score_after = f"{context.post_remediation_score:.1f} / 100"
+        elif context.stage.value == "COMPLETED" or context.remediation_actions:
+            score_after = f"{m.quality_score_v2:.1f} / 100"
+        else:
+            score_after = "Pending Remediation"
+
+        md_lines.extend([
+            f"| Intelligence Metric | Value |",
+            f"|---|---|",
+            f"| **Total Raw Issues** | {raw_issues_count} |",
+            f"| **Correlated Issues** | {correlated_count} |",
+            f"| **Deduplicated Issues** | {dedup_count} |",
+            f"| **High-Confidence Issues** | {high_conf} |",
+            f"| **Medium-Confidence Issues** | {med_conf} |",
+            f"| **Low-Confidence Issues** | {low_conf} |",
+            f"| **Safe Remediation Candidates** | {safe_candidates} |",
+            f"| **Remediated Issues** | {remediated_cnt} |",
+            f"| **Unresolved Issues** | {unresolved_cnt} |",
+            f"| **New Issues** | {new_cnt} |",
+            f"| **Manual-Review Issues** | {manual_rev_cnt} |",
+            f"| **Unsupported Issues** | {unsupported_cnt} |",
+            f"| **Quality Score (Before Remediation)** | {score_before} |",
+            f"| **Quality Score (After Remediation)** | {score_after} |",
+            f"",
+        ])
+
+        if not u_issues:
+            md_lines.append("No unified accessibility intelligence issues to display.\n")
+        else:
+            md_lines.extend([
+                f"### Correlated Unified Issues",
+                f"",
+                f"| Slide | Shape | Primary Rule | Related Rules | Severity | Confidence | Explanation | Recommended Action | Final Status | Verification |",
+                f"|---|---|---|---|---|---|---|---|---|---|",
+            ])
+            for u in u_issues:
+                shape_str = f"`{u.shape_id}`" if u.shape_id is not None else "Slide"
+                related_str = ", ".join(f"`{r}`" for r in u.related_rule_ids) if u.related_rule_ids else "None"
+                rec_stat = getattr(u.reconciliation_status, "value", str(u.reconciliation_status))
+                conf_str = getattr(u.confidence, "value", str(u.confidence))
+                sev_str = getattr(u.severity, "value", str(u.severity))
+                verif_str = getattr(u, "verification_status", "PENDING") or "PENDING"
+                md_lines.append(
+                    f"| {u.slide_number} | {shape_str} | `{u.primary_rule_id}` | {related_str} | **{sev_str}** | **{conf_str}** | {u.explanation} | {u.recommended_action} | `{rec_stat}` | {verif_str} |"
+                )
+            md_lines.append("")
+
+        md_lines.extend([
+            f"---",
+            f"",
+            f"## 8. Remediation Pipeline Log",
+            f"",
+        ])
+
+        if not context.remediation_actions:
+            md_lines.append("Remediation was not executed for this run (Analysis only).\n")
+        else:
+            md_lines.extend([
+                f"| Step ID | Target Slide | Status | Action Description | Confidence |",
+                f"|---|---|---|---|---|",
+            ])
+            for action in context.remediation_actions:
+                md_lines.append(
+                    f"| `{action.rule_id}` | {action.slide_number} | `{action.status.value}` | {action.description} | {action.confidence:.0%} |"
+                )
+            md_lines.append("")
+
+        if v:
+            md_lines.extend([
+                f"---",
+                f"",
+                f"## 9. Verification Check Details",
+                f"",
+                f"**Overall Verification:** {'✅ PASSED' if v.passed else '❌ FAILED'}  ",
+                f"Passed: {v.passed_checks} / {v.total_checks} checks  ",
+                f"",
+                f"| Check Name | Slide | Status | Details |",
+                f"|---|---|---|---|",
+            ])
+            for chk in v.checks:
+                md_lines.append(
+                    f"| {chk.name} | {chk.slide_number} | {'✅ Pass' if chk.passed else '❌ Fail'} | {chk.details} |"
+                )
+            md_lines.append("")
+
+        # Phase 9: AI-Assisted Accessibility Authoring & Audit Trail
+        ai_recs = getattr(context, "ai_recommendations", [])
+        ai_audit = getattr(context, "ai_audit_trail", [])
+        ai_summary = getattr(context, "ai_authoring_summary", {}) or {}
+
+        md_lines.extend([
+            f"---",
+            f"",
+            f"## 10. AI-Assisted Accessibility Authoring & Audit Trail",
+            f"",
+            f"> **Notice:** AI-generated authoring proposals (powered strictly by Gemini 3.8 Flash High) "
+            f"require explicit human approval before deterministic OOXML application. AI assistance does not certify WCAG compliance.",
+            f"",
+            f"### Authoring Metrics Summary",
+            f"",
+            f"| Metric | Value |",
+            f"|---|---|",
+            f"| **Recommendations Generated** | {ai_summary.get('generated', len(ai_recs))} |",
+            f"| **Recommendations Approved** | {ai_summary.get('approved', sum(1 for r in ai_recs if getattr(r, 'status', None) == 'APPROVED'))} |",
+            f"| **Recommendations Edited** | {ai_summary.get('edited', sum(1 for r in ai_recs if getattr(r, 'status', None) == 'EDITED'))} |",
+            f"| **Recommendations Rejected** | {ai_summary.get('rejected', sum(1 for r in ai_recs if getattr(r, 'status', None) == 'REJECTED'))} |",
+            f"| **Recommendations Applied** | {ai_summary.get('applied', sum(1 for r in ai_recs if getattr(r, 'status', None) == 'APPLIED'))} |",
+            f"| **Recommendations Failed** | {ai_summary.get('failed', sum(1 for r in ai_recs if getattr(r, 'status', None) == 'FAILED'))} |",
+            f"| **Manual Reviews** | {ai_summary.get('manual_review', sum(1 for r in ai_recs if getattr(r, 'status', None) == 'MANUAL_REVIEW'))} |",
+            f"| **AI Fallback Cases** | {ai_summary.get('fallback_cases', 0)} |",
+            f"| **Malformed AI Responses** | {ai_summary.get('malformed_responses', 0)} |",
+            f"",
+        ])
+
+        if not ai_recs:
+            md_lines.append("No AI accessibility authoring recommendations generated for this run.\n")
+        else:
+            md_lines.extend([
+                f"### Structured AI Authoring Recommendations",
+                f"",
+                f"| Rec ID | Slide | Shape | Authoring Type | Original Value | AI Suggestion | Confidence | Grounding | Decision Status |",
+                f"|---|---|---|---|---|---|---|---|---|",
+            ])
+            for r in ai_recs:
+                r_id = getattr(r, "recommendation_id", "N/A")
+                sl_num = getattr(r, "slide_number", 0)
+                sh_id = getattr(r, "shape_id", "Slide")
+                a_type = getattr(r, "authoring_type", "")
+                if hasattr(a_type, "value"):
+                    a_type = a_type.value
+                orig = getattr(r, "original_value", "") or getattr(r, "current_value", "")
+                sugg = getattr(r, "suggested_value", "")
+                conf = getattr(r, "confidence", 0.0)
+                ground = getattr(r, "fact_grounding", "SUPPORTED_FACT")
+                if hasattr(ground, "value"):
+                    ground = ground.value
+                stat = getattr(r, "status", "PENDING_REVIEW")
+                if hasattr(stat, "value"):
+                    stat = stat.value
+                md_lines.append(
+                    f"| `{r_id}` | {sl_num} | `{sh_id}` | `{a_type}` | {orig[:30]} | {sugg[:45]} | {conf:.0%} | `{ground}` | **{stat}** |"
+                )
+            md_lines.append("")
+
+        if ai_audit:
+            md_lines.extend([
+                f"### Authoring Audit Trail (Lineage Log)",
+                f"",
+                f"| Audit ID | Recommendation ID | Model | Type | Slide | Shape | AI Suggestion | User Decision | Applied Value | Timestamp |",
+                f"|---|---|---|---|---|---|---|---|---|---|",
+            ])
+            for aud in ai_audit:
+                md_lines.append(
+                    f"| `{aud.get('audit_id')}` | `{aud.get('recommendation_id')}` | `{aud.get('model')}` | `{aud.get('authoring_type')}` | {aud.get('slide_number')} | `{aud.get('shape_id')}` | {aud.get('ai_suggestion')[:30]} | **{aud.get('user_decision')}** | {aud.get('final_applied_value')[:30]} | {aud.get('timestamp')[:19]} |"
+                )
+            md_lines.append("")
+
+        # Task 3: AI-Assisted Alternative Text & Decorative Image Detection Report
+        t3_report = getattr(context, "task_3_report", {}) or {}
+        t3_summary = t3_report.get("summary", {})
+        t3_images = t3_report.get("changed_images", [])
+
+        if t3_summary or t3_images:
+            md_lines.extend([
+                f"---",
+                f"",
+                f"## 11. Task 3: Alternative Text & Decorative Image Report",
+                f"",
+                f"> **Model Traceability:** SlideGuard runtime semantic AI: `Gemini 3.5` | Fallback: `Gemini 3.1` | Implementation: `Gemini 3.8 Flash High`",
+                f"",
+                f"### Image Accessibility Metrics",
+                f"",
+                f"| Metric | Value |",
+                f"|---|---|",
+                f"| **Total Image Objects** | {t3_summary.get('total_images', len(t3_images))} |",
+                f"| **Meaningful Images** | {t3_summary.get('meaningful_images', 0)} |",
+                f"| **Decorative Images** | {t3_summary.get('decorative_images', 0)} |",
+                f"| **Unknown Images** | {t3_summary.get('unknown_images', 0)} |",
+                f"| **Existing Good Alt Text** | {t3_summary.get('existing_good_alt_text', 0)} |",
+                f"| **Existing Missing Alt Text** | {t3_summary.get('existing_missing_alt_text', 0)} |",
+                f"| **Generated Alt Text** | {t3_summary.get('generated_alt_text', 0)} |",
+                f"| **Images Marked Decorative** | {t3_summary.get('images_marked_decorative', 0)} |",
+                f"| **Manual Review Items** | {t3_summary.get('manual_review_items', 0)} |",
+                f"| **High-Confidence Decisions (>=0.85)** | {t3_summary.get('high_confidence_decisions', 0)} |",
+                f"| **Medium-Confidence Decisions (0.70-0.849)** | {t3_summary.get('medium_confidence_decisions', 0)} |",
+                f"| **Low-Confidence Decisions (<0.70)** | {t3_summary.get('low_confidence_decisions', 0)} |",
+                f"| **Animation-Protected Images** | {t3_summary.get('animation_protected_images', 0)} |",
+                f"| **Group-Protected Images** | {t3_summary.get('group_protected_images', 0)} |",
+                f"| **Failed Images** | {t3_summary.get('failed_images', 0)} |",
+                f"",
+            ])
+
+            if t3_images:
+                md_lines.extend([
+                    f"### Detailed Image Evaluation Records",
+                    f"",
+                    f"| Slide | Shape ID | Shape Name | Classification | Action | Basis | Quality | Alt Text | Conf | Reason | Status |",
+                    f"|---|---|---|---|---|---|---|---|---|---|---|",
+                ])
+                for img in t3_images:
+                    new_txt = img.get('new_alt_text') or img.get('original_alt_text') or "[None]"
+                    conf_pct = f"{img.get('confidence', 0):.0%}"
+                    basis = img.get('generation_basis', 'STRUCTURAL_CONTEXT')
+                    q_class = img.get('quality_class', 'MANUAL_REVIEW')
+                    md_lines.append(
+                        f"| {img.get('slide_number')} | `{img.get('shape_id')}` | {img.get('shape_name')} | **{img.get('classification')}** | `{img.get('action')}` | `{basis}` | `{q_class}` | {new_txt[:30]} | {conf_pct} | {img.get('reason')} | `{img.get('verification_status')}` |"
+                    )
+                md_lines.append("")
+
+        target = Path(output_file).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(md_lines), encoding="utf-8")
+        return target
+
+    def _build_report_dict(self, context: JobContext) -> Dict[str, Any]:
+        return {
+            "job_id": context.job_id,
+            "original_file": str(context.original_file),
+            "stage": context.stage.value,
+            "duration_seconds": context.duration_seconds,
+            "total_slides": context.total_slides,
+            "slides_analyzed": context.slides_analyzed,
+            "metrics": context.metrics.to_dict(),
+            "rule_results": [res.to_dict() for res in context.rule_results],
+            "remediation_actions": [act.to_dict() for act in context.remediation_actions],
+            "verification_result": context.verification_result.to_dict() if context.verification_result else None,
+            "comparison_result": context.comparison_result.to_dict() if context.comparison_result else None,
+            "unified_issues": [u.to_dict() for u in context.unified_issues],
+            "intelligence_summary": context.intelligence_summary,
+            "pre_remediation_score": context.pre_remediation_score,
+            "post_remediation_score": context.post_remediation_score,
+            "ai_authoring_summary": getattr(context, "ai_authoring_summary", {}),
+            "ai_recommendations": [r.to_dict() if hasattr(r, "to_dict") else r for r in getattr(context, "ai_recommendations", [])],
+            "ai_audit_trail": getattr(context, "ai_audit_trail", []),
+            "task_3_report": getattr(context, "task_3_report", {}),
+            "image_decisions": [d.to_dict() if hasattr(d, "to_dict") else d for d in getattr(context, "image_decisions", [])],
+        }
