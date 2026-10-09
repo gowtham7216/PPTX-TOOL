@@ -33,6 +33,8 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
+.mypy_cache/
+.ruff_cache/
 
 # PyInstaller / Build
 *.manifest
@@ -40,6 +42,7 @@ coverage.xml
 
 # SlideGuard Workspace runtime directories
 workspace/job_*/
+workspace_runs/job_*/
 temp/
 output/
 scratch/

@@ -140,7 +140,8 @@ class RemediationService:
             description=f"STEP 3: Native Placeholder Conversion. Evaluated and processed {len(presentation.slides)} slides in-place.",
             status=RemediationStatus.APPLIED if converted_count > 0 else RemediationStatus.SKIPPED,
             is_user_approved=True,
-            confidence=0.95
+            confidence=0.95,
+            remediated_state=context.task_4_placeholder_report or {}
         )
         actions.append(step_3_action)
 
@@ -357,6 +358,13 @@ class RemediationService:
 
         if ph_affected_slides:
             self._refresh_modified_slides(presentation, ph_affected_slides)
+
+        # Generate Option C comprehensive placeholder audit report across all slides
+        try:
+            task_4_report = self.ph_rule.generate_presentation_audit_report(presentation)
+            context.task_4_placeholder_report = task_4_report
+        except Exception as e:
+            logger.warning("Failed to generate task_4_placeholder_report: %s", e)
 
         logger.info("Placeholder conversion completed: %d shapes converted/remediated in-place.", converted_count)
         return step_actions

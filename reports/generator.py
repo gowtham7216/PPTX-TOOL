@@ -133,35 +133,82 @@ class ReportGenerator:
             f"",
         ])
 
-        # Extract placeholder issues
-        ph_issues = []
-        for res in context.rule_results:
-            if res.rule_id == "SG-PH-01":
-                ph_issues.extend(res.issues)
-
-        if not ph_issues:
-            md_lines.append("All slide placeholders are structurally compliant; no conversions required.\n")
-        else:
+        t4_report = getattr(context, "task_4_placeholder_report", None)
+        if t4_report:
             md_lines.extend([
-                f"| Slide # | Shape ID | Name | Category | Status | Inherited From | Proposed Action / Reason |",
-                f"|---|---|---|---|---|---|---|",
+                f"### Task 4 Option C Conversion Audit Summary",
+                f"",
+                f"| Metric | Value |",
+                f"|---|---|",
+                f"| **Total Slides Evaluated** | {t4_report.get('total_slides_evaluated', 0)} |",
+                f"| **Slides Changed** | {t4_report.get('slides_changed', 0)} |",
+                f"| **Slides Unchanged** | {t4_report.get('slides_unchanged', 0)} |",
+                f"| **Candidates Detected** | {t4_report.get('candidates_detected', 0)} |",
+                f"| **Conversions Proposed** | {t4_report.get('conversions_proposed', 0)} |",
+                f"| **Conversions Approved** | {t4_report.get('conversions_approved', 0)} |",
+                f"| **Conversions Applied** | {t4_report.get('conversions_applied', 0)} |",
+                f"| **Conversions Verified** | {t4_report.get('conversions_verified', 0)} |",
+                f"| **Conversions Rolled Back** | {t4_report.get('conversions_rolled_back', 0)} |",
+                f"| **Existing Objects Converted** | {t4_report.get('existing_objects_converted', 0)} |",
+                f"| **New Placeholders Created** | {t4_report.get('new_placeholders_created', 0)} |",
+                f"| **Native Placeholders Preserved** | {t4_report.get('native_placeholders_preserved', 0)} |",
+                f"| **Candidates Skipped** | {t4_report.get('candidates_skipped', 0)} |",
+                f"| **Candidates Manual Review** | {t4_report.get('candidates_manual_review', 0)} |",
+                f"| **Failed Conversions** | {t4_report.get('failed_conversions', 0)} |",
+                f"| **Visual Integrity Verified** | {'✅ Yes' if t4_report.get('visual_integrity_verified') else '⚠️ Unverified'} |",
+                f"",
             ])
-            for issue in ph_issues:
-                extra = issue.extra_data or {}
-                s_id = issue.shape_id or extra.get("shape_id", "N/A")
-                s_name = issue.shape_name or extra.get("shape_name", "Shape")
-                cat = extra.get("category", "OTHER")
-                st = extra.get("status", "PRESERVED")
-                inh = extra.get("inherited_from", "slide")
-                reason = extra.get("reason", issue.description)
-                rec = extra.get("recommendation", issue.recommendation)
-                status_icon = "✅ Safe to Convert" if st == "SAFE_TO_CONVERT" else ("⚠️ Manual Review" if st == "MANUAL_REVIEW" else "🛡️ Preserved")
-                action_text = rec if st == "SAFE_TO_CONVERT" else reason
 
-                md_lines.append(
-                    f"| {issue.slide_number} | `{s_id}` | {s_name} | `{cat}` | {status_icon} | {inh} | {action_text} |"
-                )
-            md_lines.append("")
+            t4_objects = t4_report.get("objects", [])
+            if t4_objects:
+                md_lines.extend([
+                    f"### Detailed Placeholder & Candidate Records",
+                    f"",
+                    f"| Slide | Shape ID | Name | Role | Action | Proposed Type | Basis / Reason | Confidence |",
+                    f"|---|---|---|---|---|---|---|---|",
+                ])
+                for obj in t4_objects:
+                    s_id = obj.get("shape_id", "N/A")
+                    name = obj.get("shape_name", "Shape")
+                    role = obj.get("semantic_role", obj.get("category", "OTHER"))
+                    act = obj.get("action", "PRESERVE_EXISTING")
+                    p_type = obj.get("proposed_placeholder_type", "none")
+                    basis = obj.get("conversion_basis", "") or obj.get("reason", "")
+                    conf = obj.get("confidence", "HIGH")
+                    md_lines.append(
+                        f"| {obj.get('slide_number')} | `{s_id}` | {name} | `{role}` | **{act}** | `{p_type}` | {basis[:40]} | {conf} |"
+                    )
+                md_lines.append("")
+        else:
+            # Extract placeholder issues from rule results fallback
+            ph_issues = []
+            for res in context.rule_results:
+                if res.rule_id == "SG-PH-01":
+                    ph_issues.extend(res.issues)
+
+            if not ph_issues:
+                md_lines.append("All slide placeholders are structurally compliant; no conversions required.\n")
+            else:
+                md_lines.extend([
+                    f"| Slide # | Shape ID | Name | Category | Status | Inherited From | Proposed Action / Reason |",
+                    f"|---|---|---|---|---|---|---|",
+                ])
+                for issue in ph_issues:
+                    extra = issue.extra_data or {}
+                    s_id = issue.shape_id or extra.get("shape_id", "N/A")
+                    s_name = issue.shape_name or extra.get("shape_name", "Shape")
+                    cat = extra.get("category", "OTHER")
+                    st = extra.get("status", "PRESERVED")
+                    inh = extra.get("inherited_from", "slide")
+                    reason = extra.get("reason", issue.description)
+                    rec = extra.get("recommendation", issue.recommendation)
+                    status_icon = "✅ Safe to Convert" if st == "SAFE_TO_CONVERT" else ("⚠️ Manual Review" if st == "MANUAL_REVIEW" else "🛡️ Preserved")
+                    action_text = rec if st == "SAFE_TO_CONVERT" else reason
+
+                    md_lines.append(
+                        f"| {issue.slide_number} | `{s_id}` | {s_name} | `{cat}` | {status_icon} | {inh} | {action_text} |"
+                    )
+                md_lines.append("")
 
         md_lines.extend([
             f"---",
@@ -514,4 +561,5 @@ class ReportGenerator:
             "ai_audit_trail": getattr(context, "ai_audit_trail", []),
             "task_3_report": getattr(context, "task_3_report", {}),
             "image_decisions": [d.to_dict() if hasattr(d, "to_dict") else d for d in getattr(context, "image_decisions", [])],
+            "task_4_placeholder_report": getattr(context, "task_4_placeholder_report", None),
         }

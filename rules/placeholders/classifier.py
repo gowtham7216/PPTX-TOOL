@@ -35,9 +35,31 @@ class PlaceholderCategory(str, Enum):
     DATE_TIME = "DATE_TIME"
     EMPTY = "EMPTY"
     STANDALONE_TITLE_BOX = "STANDALONE_TITLE_BOX"
+    STANDALONE_SUBTITLE_BOX = "STANDALONE_SUBTITLE_BOX"
+    STANDALONE_BODY_BOX = "STANDALONE_BODY_BOX"
     CARD_BADGE = "CARD_BADGE"
     CARD_COMPONENT = "CARD_COMPONENT"
+    GROUP_COMPONENT = "GROUP_COMPONENT"
     OTHER = "OTHER"
+
+
+class ConversionAction(str, Enum):
+    """Primary action classification for PowerPoint objects (Task 4 Option C)."""
+    CONVERT_EXISTING = "CONVERT_EXISTING"
+    CREATE_NEW = "CREATE_NEW"
+    PRESERVE_EXISTING = "PRESERVE_EXISTING"
+    SKIP_UNSAFE = "SKIP_UNSAFE"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
+    FAILED = "FAILED"
+
+
+class DifferenceCategory(str, Enum):
+    """Verification difference classifications."""
+    EXPECTED_ACCESSIBILITY_CHANGE = "EXPECTED_ACCESSIBILITY_CHANGE"
+    UNINTENDED_STRUCTURAL_CHANGE = "UNINTENDED_STRUCTURAL_CHANGE"
+    UNINTENDED_VISUAL_CHANGE = "UNINTENDED_VISUAL_CHANGE"
+    UNVERIFIED = "UNVERIFIED"
+    VERIFICATION_FAILURE = "VERIFICATION_FAILURE"
 
 
 import re
@@ -80,6 +102,16 @@ def is_short_label_or_decorative(text: str) -> bool:
     return False
 
 
+def is_caption_or_metadata(text: str) -> bool:
+    """Checks if text is a figure/table caption, callout, photo credit, or metadata label."""
+    t = text.strip()
+    if not t:
+        return False
+    if re.match(r"^(?:figure|fig\.|table|chart|source|photo|image|note|diagram)\s*[\d.:\-]", t, re.IGNORECASE):
+        return True
+    return False
+
+
 def detect_repeated_components(candidates: List[Dict[str, Any]]) -> Set[int]:
     """
     Detects repeated visual structures (e.g. multi-card layouts with '01', '02', '03',
@@ -89,7 +121,7 @@ def detect_repeated_components(candidates: List[Dict[str, Any]]) -> Set[int]:
     badge_ids: Set[int] = set()
     for c in candidates:
         t = (c.get("text_content") or "").strip()
-        if is_numeric_badge(t) or is_short_label_or_decorative(t):
+        if is_numeric_badge(t) or is_short_label_or_decorative(t) or is_caption_or_metadata(t):
             badge_ids.add(c["shape_id"])
     return badge_ids
 
@@ -112,6 +144,9 @@ def score_title_candidate(cand: Dict[str, Any], slide_h: float, slide_w: float) 
         score += 10.0
     elif w_count > 25:
         score -= 20.0
+
+    if is_caption_or_metadata(t):
+        return -100.0
 
     # Typography (max font size and bold)
     max_sz = cand.get("max_font_size", 0.0)
@@ -185,10 +220,23 @@ class PlaceholderAnalysis:
         "antigravity_coding_model": "Gemini 3.8 Flash High",
         "slideguard_runtime_model": "Gemini 3.5"
     })
+    action: ConversionAction = ConversionAction.PRESERVE_EXISTING
+    semantic_role: str = "OTHER"
+    conversion_basis: str = ""
+    is_group_child: bool = False
+    parent_group_id: Optional[int] = None
+    before_placeholder_type: str = "none"
+    proposed_placeholder_type: str = "none"
+    has_ph: bool = False
+    verified: bool = False
+    verification_category: Optional[DifferenceCategory] = None
 
     @property
     def is_safe_to_convert(self) -> bool:
-        return self.status == PlaceholderStatus.SAFE_TO_CONVERT
+        return (
+            self.status == PlaceholderStatus.SAFE_TO_CONVERT
+            or self.action in (ConversionAction.CONVERT_EXISTING, ConversionAction.CREATE_NEW)
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -199,6 +247,16 @@ class PlaceholderAnalysis:
             "placeholder_idx": self.placeholder_idx,
             "category": self.category.value,
             "status": self.status.value,
+            "action": self.action.value if hasattr(self.action, "value") else str(self.action),
+            "semantic_role": self.semantic_role,
+            "conversion_basis": self.conversion_basis,
+            "is_group_child": self.is_group_child,
+            "parent_group_id": self.parent_group_id,
+            "before_placeholder_type": self.before_placeholder_type,
+            "proposed_placeholder_type": self.proposed_placeholder_type,
+            "has_ph": self.has_ph,
+            "verified": self.verified,
+            "verification_category": self.verification_category.value if self.verification_category else None,
             "has_text": self.has_text,
             "text_preview": self.text_preview,
             "is_empty": self.is_empty,
@@ -242,36 +300,85 @@ class PlaceholderClassifier:
         slide_number: int,
         animation_target_ids: Optional[List[int]] = None,
         slide_height_pt: float = 540.0,
-        slide_width_pt: float = 720.0
+        slide_width_pt: float = 720.0,
+        include_all_shapes: bool = False
     ) -> List[PlaceholderAnalysis]:
         """
         Analyzes all placeholders and candidate shapes on a slide using
         Gemini 3.5 runtime semantic reasoning and deterministic safety gates.
-        Architecture:
-          1. Candidate Detection
-          2. Context Extraction (No PPTX filesystem paths)
-          3. Gemini 3.5 Runtime Semantic Decision
-          4. Strict JSON Validation
-          5. Deterministic Safety Gate
+        Option C Architecture:
+          1. Candidate Detection across all shapes (including group children)
+          2. Multi-Signal Semantic Classification & Candidate Ranking
+          3. Protected Object Gates (badges, short labels, groups, animations)
+          4. Conversion Action Assignment (CONVERT_EXISTING, CREATE_NEW, PRESERVE_EXISTING, SKIP_UNSAFE, MANUAL_REVIEW, FAILED)
+          5. Model Traceability & Strict Verification Readiness
         """
         results: List[PlaceholderAnalysis] = []
         anim_set = set(animation_target_ids or [])
 
-        if raw_slide is None or not hasattr(raw_slide, "_element"):
+        if raw_slide is None:
             return results
 
-        slide_elem = raw_slide._element
+        slide_elem = raw_slide._element if hasattr(raw_slide, "_element") else raw_slide
 
         # =====================================================================
-        # 1. CANDIDATE DETECTION
+        # 1. CANDIDATE DETECTION ACROSS ROOT AND GROUPED OBJECTS
         # =====================================================================
         candidates_raw = []
         has_slide_title = False
         existing_native_title_id: Optional[int] = None
+        has_slide_subtitle = False
 
         for child_elem in _safe_xpath(slide_elem, ".//p:spTree/*"):
             tag = child_elem.tag.split("}")[-1]
             if tag in ("nvGrpSpPr", "grpSpPr"):
+                continue
+
+            # Handle Group Shapes
+            if tag == "grpSp":
+                grp_cnv = _safe_xpath(child_elem, ".//p:cNvPr")
+                grp_id = int(grp_cnv[0].get("id", "0")) if grp_cnv else 0
+                grp_name = grp_cnv[0].get("name", f"Group_{grp_id}") if grp_cnv else f"Group_{grp_id}"
+
+                # Extract and protect child shapes inside the group
+                for g_child in _safe_xpath(child_elem, ".//p:sp | .//p:pic | .//p:graphicFrame"):
+                    g_cnv = _safe_xpath(g_child, ".//p:cNvPr")
+                    g_sid = int(g_cnv[0].get("id", "0")) if g_cnv else 0
+                    g_name = g_cnv[0].get("name", f"GroupChild_{g_sid}") if g_cnv else f"GroupChild_{g_sid}"
+                    g_anim = g_sid in anim_set
+                    g_ph_elems = _safe_xpath(g_child, ".//p:ph")
+                    g_raw_ph_type = g_ph_elems[0].get("type") if g_ph_elems else None
+                    g_ph_idx = g_ph_elems[0].get("idx") if g_ph_elems else None
+                    g_text, g_has_text, g_max_sz, g_is_bold = self._extract_text_and_typography(g_child)
+                    g_pic = bool(_safe_xpath(g_child, ".//p:pic") or _safe_xpath(g_child, ".//a:blip") or g_child.tag.endswith("pic"))
+                    g_tbl = bool(_safe_xpath(g_child, ".//a:tbl"))
+                    g_chart = bool(_safe_xpath(g_child, ".//c:chart") or _safe_xpath(g_child, ".//a:graphicData[contains(@uri, 'chart')]"))
+                    g_empty = (not g_has_text) and (not g_pic) and (not g_tbl) and (not g_chart)
+                    g_rel_ids = self._extract_relationships(g_child)
+                    g_inherited = self.resolver.resolve_placeholder(shape_elem=g_child, raw_slide=raw_slide)
+
+                    candidates_raw.append({
+                        "shape_elem": g_child,
+                        "shape_id": g_sid,
+                        "name": g_name,
+                        "raw_ph_type": g_raw_ph_type,
+                        "ph_idx": g_ph_idx,
+                        "is_animated": g_anim,
+                        "text_content": g_text,
+                        "has_text": g_has_text,
+                        "max_font_size": g_max_sz,
+                        "is_bold": g_is_bold,
+                        "is_pic": g_pic,
+                        "is_tbl": g_tbl,
+                        "is_chart": g_chart,
+                        "is_empty": g_empty,
+                        "rel_ids": g_rel_ids,
+                        "inherited": g_inherited,
+                        "bbox_pt": g_inherited.xfrm_pt or (0.0, 0.0, 0.0, 0.0),
+                        "has_ph": bool(g_ph_elems),
+                        "is_group_child": True,
+                        "parent_group_id": grp_id,
+                    })
                 continue
 
             cnv_prs = _safe_xpath(child_elem, ".//p:cNvPr")
@@ -293,6 +400,8 @@ class PlaceholderClassifier:
             if resolved_type in ("title", "ctrtitle"):
                 has_slide_title = True
                 existing_native_title_id = shape_id
+            elif resolved_type == "subtitle":
+                has_slide_subtitle = True
 
             text_content, has_text, max_font_size, is_bold = self._extract_text_and_typography(child_elem)
             is_pic = bool(_safe_xpath(child_elem, ".//p:pic") or _safe_xpath(child_elem, ".//a:blip") or child_elem.tag.endswith("pic"))
@@ -320,17 +429,49 @@ class PlaceholderClassifier:
                 "inherited": inherited,
                 "bbox_pt": bbox_pt,
                 "has_ph": bool(ph_elems),
+                "is_group_child": False,
+                "parent_group_id": None,
             })
 
         # =====================================================================
-        # 2. REPEATED-COMPONENT DETECTION & CANDIDATE RANKING
+        # 2. REPEATED-COMPONENT DETECTION & LAYOUT CAPABILITIES
         # =====================================================================
         badge_ids = detect_repeated_components(candidates_raw)
 
+        # Inspect layout placeholder capabilities
+        layout_has_subtitle = False
+        layout_has_body = False
+        layout_body_idx = "1"
+        if raw_slide is not None and hasattr(raw_slide, "slide_layout") and raw_slide.slide_layout is not None:
+            try:
+                for ph_tag in _safe_xpath(raw_slide.slide_layout._element, ".//p:ph"):
+                    pt = (ph_tag.get("type") or "").lower()
+                    if pt == "subtitle":
+                        layout_has_subtitle = True
+                    if pt in ("body", "obj") or (not pt and ph_tag.get("idx") in ("1", "2")):
+                        layout_has_body = True
+                        layout_body_idx = ph_tag.get("idx", "1")
+            except Exception:
+                pass
+
+        # Check if slide already has a native body placeholder
+        has_native_body = any(
+            c["has_ph"] and (
+                (c["raw_ph_type"] or "").lower() in ("body", "obj")
+                or (not c["raw_ph_type"] and c["ph_idx"] in ("1", "2"))
+            )
+            for c in candidates_raw
+        )
+
+        # =====================================================================
+        # 3. TITLE CANDIDATE EVALUATION & GEMINI INTEGRATION
+        # =====================================================================
         scored_candidates = []
         anim_title_candidate_ids: Set[int] = set()
         if not has_slide_title:
             for c in candidates_raw:
+                if c.get("is_group_child"):
+                    continue
                 sid = c["shape_id"]
                 if sid in badge_ids:
                     continue
@@ -339,7 +480,7 @@ class PlaceholderClassifier:
                 if c["has_ph"]:
                     continue
                 t_str = c["text_content"].strip()
-                if len(t_str) < 4:
+                if len(t_str) < 4 or is_caption_or_metadata(t_str):
                     continue
                 if c["bbox_pt"][1] >= slide_height_pt * 0.88:
                     continue
@@ -383,23 +524,23 @@ class PlaceholderClassifier:
                     "is_table": c["is_tbl"],
                     "is_chart": c["is_chart"],
                     "is_animated": c["is_animated"],
+                    "is_group_child": c.get("is_group_child", False),
                     "inherited_from": c["inherited"].inherited_from,
                     "inherited_xfrm_available": bool(c["inherited"].xfrm_emu or c["inherited"].has_slide_xfrm),
                 }
                 for c in candidates_raw
+                if not c.get("is_group_child")  # Focus root shapes for external decision
             ]
         }
 
-        # =====================================================================
-        # 3. GEMINI 3.5 RUNTIME SEMANTIC DECISION
-        # =====================================================================
-        gemini_response = self.assistant.analyze_placeholder_conversion(slide_context)
+        try:
+            gemini_response = self.assistant.analyze_placeholder_conversion(slide_context)
+        except Exception as e:
+            logger.warning("Gemini semantic analysis unavailable or timed out: %s; falling back to deterministic safety checks.", e)
+            gemini_response = {"decisions": [], "error": str(e), "selected_title_shape_id": None}
         decisions_map = {d["shape_id"]: d for d in gemini_response.get("decisions", [])}
         gemini_selected_id = gemini_response.get("selected_title_shape_id")
 
-        # =====================================================================
-        # 4. DETERMINISTIC SAFETY GATE & RESOLUTION
-        # =====================================================================
         promoted_title_shape_id: Optional[int] = None
         if not has_slide_title:
             if gemini_selected_id is not None:
@@ -412,13 +553,15 @@ class PlaceholderClassifier:
                 elif (
                     cand_lookup is None
                     or cand_lookup["is_animated"]
+                    or cand_lookup.get("is_group_child")
                     or gemini_selected_id in badge_ids
                     or is_numeric_badge(cand_lookup["text_content"])
                     or is_short_label_or_decorative(cand_lookup["text_content"])
+                    or is_caption_or_metadata(cand_lookup["text_content"])
                     or len(cand_lookup["text_content"].strip()) < 4
                 ):
                     logger.warning(
-                        "Safety gate rejected Gemini title selection for Shape ID %s (badge/label/animated); falling back to deterministic ranker (%s).",
+                        "Safety gate rejected Gemini title selection for Shape ID %s (badge/label/animated/group); falling back to deterministic ranker (%s).",
                         gemini_selected_id, deterministic_title_shape_id
                     )
                     promoted_title_shape_id = deterministic_title_shape_id
@@ -427,6 +570,89 @@ class PlaceholderClassifier:
             else:
                 promoted_title_shape_id = deterministic_title_shape_id
 
+        # =====================================================================
+        # 4. SUBTITLE & BODY CANDIDATE EVALUATION
+        # =====================================================================
+        effective_title_id = existing_native_title_id or promoted_title_shape_id
+
+        # Subtitle promotion evaluation
+        promoted_subtitle_shape_id: Optional[int] = None
+        if effective_title_id is not None and not has_slide_subtitle and layout_has_subtitle:
+            subtitle_candidates = []
+            for c in candidates_raw:
+                sid = c["shape_id"]
+                if sid == effective_title_id or c.get("is_group_child") or c["is_animated"]:
+                    continue
+                if sid in badge_ids or is_numeric_badge(c["text_content"]) or is_short_label_or_decorative(c["text_content"]):
+                    continue
+                if not c["has_text"] or c["is_empty"] or c["has_ph"]:
+                    continue
+                t_str = c["text_content"].strip()
+                words = t_str.split()
+                if not (1 <= len(words) <= 20) or len(t_str) < 3:
+                    continue
+                bbox = c["bbox_pt"]
+                if bbox[1] >= slide_height_pt * 0.75:
+                    continue
+                title_c = next((cand for cand in candidates_raw if cand["shape_id"] == effective_title_id), None)
+                title_font = title_c["max_font_size"] if title_c else 24.0
+                if c["max_font_size"] > title_font and title_font > 0:
+                    continue
+
+                sub_score = 15.0
+                if layout_has_subtitle:
+                    sub_score += 30.0
+                if c["is_bold"]:
+                    sub_score += 10.0
+                if 14.0 <= c["max_font_size"] <= 24.0:
+                    sub_score += 15.0
+                if bbox[1] <= slide_height_pt * 0.50:
+                    sub_score += 15.0
+                if len(words) <= 12:
+                    sub_score += 10.0
+                subtitle_candidates.append((sub_score, sid))
+
+            subtitle_candidates.sort(key=lambda x: x[0], reverse=True)
+            if subtitle_candidates and subtitle_candidates[0][0] >= 35.0:
+                promoted_subtitle_shape_id = subtitle_candidates[0][1]
+
+        # Body promotion evaluation
+        promoted_body_shape_id: Optional[int] = None
+        if layout_has_body and not has_native_body:
+            body_candidates = []
+            for c in candidates_raw:
+                sid = c["shape_id"]
+                if sid in (effective_title_id, promoted_subtitle_shape_id):
+                    continue
+                if c.get("is_group_child") or c["is_animated"]:
+                    continue
+                if sid in badge_ids or is_numeric_badge(c["text_content"]) or is_short_label_or_decorative(c["text_content"]):
+                    continue
+                if not c["has_text"] or c["is_empty"] or c["has_ph"]:
+                    continue
+                t_str = c["text_content"].strip()
+                words = t_str.split()
+                if len(words) < 3 or len(t_str) < 15:
+                    continue
+                if c["bbox_pt"][1] >= slide_height_pt * 0.88:
+                    continue
+                if c["max_font_size"] > 24.0:
+                    continue
+
+                b_score = 20.0
+                if len(words) >= 6:
+                    b_score += 20.0
+                if "\n" in t_str or "•" in t_str or "-" in t_str:
+                    b_score += 20.0
+                body_candidates.append((b_score, sid))
+
+            body_candidates.sort(key=lambda x: x[0], reverse=True)
+            if body_candidates and body_candidates[0][0] >= 35.0:
+                promoted_body_shape_id = body_candidates[0][1]
+
+        # =====================================================================
+        # 5. OBJECT CLASSIFICATION & ACTION ASSIGNMENT
+        # =====================================================================
         for c in candidates_raw:
             sid = c["shape_id"]
             ph_type = c["raw_ph_type"]
@@ -438,13 +664,16 @@ class PlaceholderClassifier:
             is_empty = c["is_empty"]
             has_text = c["has_text"]
             text_content = c["text_content"]
+            is_group_child = c.get("is_group_child", False)
+            parent_group_id = c.get("parent_group_id")
 
             base_category = self._classify_category(
                 raw_ph_type=ph_type,
                 is_pic=c["is_pic"],
                 is_tbl=c["is_tbl"],
                 is_chart=c["is_chart"],
-                is_empty=is_empty
+                is_empty=is_empty,
+                has_ph=c["has_ph"]
             )
             base_status, base_rec, base_reason, base_conf = self._evaluate_safety(
                 shape_id=sid,
@@ -456,117 +685,199 @@ class PlaceholderClassifier:
             )
 
             g_dec = decisions_map.get(sid, {})
-            g_action = g_dec.get("action", "PRESERVE")
             g_conf = float(g_dec.get("confidence", 0.85))
+
+            proposed_ph_type = "none"
+            semantic_role = "OTHER"
+            conversion_basis = ""
 
             # HARD SAFETY RULE 1: Animation Targets must NEVER be auto-converted
             if is_animated:
                 if c["has_ph"]:
-                    final_category = base_category
+                    final_action = ConversionAction.MANUAL_REVIEW
                     final_status = PlaceholderStatus.MANUAL_REVIEW
+                    final_category = base_category
                     final_rec = "Preserve animated placeholder without modifying tags."
                     final_reason = f"Shape ID {sid} is targeted by animation sequence; conversion requires timing review."
                     final_conf_str = "MEDIUM"
+                    semantic_role = base_category.value
+                    conversion_basis = "ANIMATION_TARGET_PROTECTION"
                 elif sid in anim_title_candidate_ids:
-                    final_category = PlaceholderCategory.STANDALONE_TITLE_BOX
+                    final_action = ConversionAction.MANUAL_REVIEW
                     final_status = PlaceholderStatus.MANUAL_REVIEW
+                    final_category = PlaceholderCategory.STANDALONE_TITLE_BOX
                     final_rec = "Preserve animated title candidate without modifying tags."
                     final_reason = f"Shape ID {sid} is an animated title candidate; conversion requires timing review."
                     final_conf_str = "MEDIUM"
+                    semantic_role = "TITLE"
+                    conversion_basis = "ANIMATION_TARGET_PROTECTION"
                 else:
-                    final_category = base_category
+                    final_action = ConversionAction.PRESERVE_EXISTING
                     final_status = PlaceholderStatus.PRESERVED
+                    final_category = base_category
                     final_rec = "Preserve animated shape."
-                    final_reason = f"Shape ID {sid} is targeted by animation sequence."
-                    final_conf_str = "MEDIUM"
+                    final_reason = f"Shape ID {sid} is targeted by animation sequence; retained as non-placeholder object."
+                    final_conf_str = "HIGH"
+                    semantic_role = "ANIMATED_SHAPE"
+                    conversion_basis = "ANIMATION_TARGET_PROTECTION"
 
-            # HARD SAFETY RULE 2: Native Titles are ALWAYS PRESERVED
+            # HARD SAFETY RULE 2: Group Children must NEVER be promoted to slide placeholders
+            elif is_group_child:
+                final_action = ConversionAction.SKIP_UNSAFE
+                final_status = PlaceholderStatus.PRESERVED
+                final_category = PlaceholderCategory.GROUP_COMPONENT
+                final_rec = "Preserve text inside grouped structure."
+                final_reason = f"Shape ID {sid} is inside group {parent_group_id}; must retain group geometry and transforms to protect layout structure."
+                final_conf_str = "HIGH"
+                semantic_role = "GROUP_COMPONENT"
+                conversion_basis = "GROUP_STRUCTURE_PROTECTION"
+
+            # HARD SAFETY RULE 3: Native Titles are ALWAYS PRESERVED
             elif base_category == PlaceholderCategory.TITLE:
+                final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = PlaceholderCategory.TITLE
                 final_status = PlaceholderStatus.PRESERVED
                 final_rec = "Preserve native title placeholder."
                 final_reason = "Title placeholders are critical for screen reader outline navigation and must remain native."
                 final_conf_str = "HIGH"
+                semantic_role = "TITLE"
+                conversion_basis = "EXISTING_NATIVE_ROLE"
 
-            # HARD SAFETY RULE 3: Footers, Slide Numbers, Dates are ALWAYS PRESERVED
+            # HARD SAFETY RULE 4: Footers, Slide Numbers, Dates are ALWAYS PRESERVED
             elif base_category in (PlaceholderCategory.FOOTER, PlaceholderCategory.SLIDE_NUMBER, PlaceholderCategory.DATE_TIME):
+                final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = base_category
                 final_status = PlaceholderStatus.PRESERVED
                 final_rec = f"Preserve native {base_category.value.lower().replace('_', ' ')} placeholder."
                 final_reason = "Has dedicated semantic slide role and must not be altered."
                 final_conf_str = "HIGH"
+                semantic_role = base_category.value
+                conversion_basis = "EXISTING_NATIVE_ROLE"
 
-            # HARD SAFETY RULE 4: Specialized Placeholders are ALWAYS PRESERVED
+            # HARD SAFETY RULE 5: Specialized Placeholders are ALWAYS PRESERVED
             elif base_category in (PlaceholderCategory.PICTURE, PlaceholderCategory.TABLE, PlaceholderCategory.CHART):
+                final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = base_category
                 final_status = PlaceholderStatus.PRESERVED
                 final_rec = f"Preserve specialized {base_category.value.lower()} placeholder."
                 final_reason = f"Contains embedded {base_category.value.lower()}; deferred to specialized remediation phase."
                 final_conf_str = "HIGH"
+                semantic_role = base_category.value
+                conversion_basis = "SPECIALIZED_CONTAINER_PROTECTION"
 
-            # HARD SAFETY RULE 5: Empty Placeholders are ALWAYS PRESERVED
+            # HARD SAFETY RULE 6: Empty Placeholders are ALWAYS PRESERVED
             elif is_empty or base_category == PlaceholderCategory.EMPTY:
+                final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = PlaceholderCategory.EMPTY
                 final_status = PlaceholderStatus.PRESERVED
                 final_rec = "Preserve empty placeholder container."
                 final_reason = "Contains no text or visual content; preserved as layout container without inventing text."
                 final_conf_str = "HIGH"
+                semantic_role = "EMPTY"
+                conversion_basis = "EMPTY_CONTAINER_PROTECTION"
 
-            # HARD SAFETY RULE 6: Subtitle Placeholders are ALWAYS PRESERVED
+            # HARD SAFETY RULE 7: Native Subtitle Placeholders are ALWAYS PRESERVED
             elif base_category == PlaceholderCategory.SUBTITLE:
+                final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = PlaceholderCategory.SUBTITLE
                 final_status = PlaceholderStatus.PRESERVED
                 final_rec = "Preserve native subtitle placeholder."
                 final_reason = "Semantic subtitle placeholder linked to slide title layout."
                 final_conf_str = "HIGH"
+                semantic_role = "SUBTITLE"
+                conversion_basis = "EXISTING_NATIVE_ROLE"
 
-            # HARD SAFETY RULE 7: Card Badges and Design Markers are ALWAYS PRESERVED
-            elif not c["has_ph"] and (sid in badge_ids or is_numeric_badge(text_content) or is_short_label_or_decorative(text_content)):
+            # HARD SAFETY RULE 8: Card Badges and Design Markers are ALWAYS PRESERVED
+            elif not c["has_ph"] and (sid in badge_ids or is_numeric_badge(text_content) or is_short_label_or_decorative(text_content) or is_caption_or_metadata(text_content)):
+                final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = PlaceholderCategory.CARD_BADGE
                 final_status = PlaceholderStatus.PRESERVED
                 final_rec = "Preserve card badge / design marker component."
-                final_reason = f"Shape ID {sid} is a card badge/marker ('{text_content[:20]}'); must not be converted to title."
+                final_reason = f"Shape ID {sid} is a card badge/marker/caption ('{text_content[:20]}'); must not be converted to title or placeholder."
                 final_conf_str = "HIGH"
+                semantic_role = "CARD_BADGE"
+                conversion_basis = "NUMERIC_BADGE_PROTECTION"
 
-            # ACTION: CONVERT_TO_TITLE (Semantically selected slide-level title)
+            # ACTION: CONVERT_EXISTING TITLE
             elif sid == promoted_title_shape_id and not has_slide_title:
+                final_action = ConversionAction.CONVERT_EXISTING
                 final_category = PlaceholderCategory.STANDALONE_TITLE_BOX
                 final_status = PlaceholderStatus.SAFE_TO_CONVERT
                 final_rec = "Convert standalone title text box into native slide title placeholder."
-                final_reason = "Slide lacks native title; text box serves as visual title and should be linked for outline navigation."
+                final_reason = "Slide lacks native title; text box serves as visual title heading and converted to native title placeholder."
                 final_conf_str = "HIGH"
+                semantic_role = "TITLE"
+                proposed_ph_type = "title"
+                conversion_basis = "MULTI_SIGNAL_HEADING"
 
-            # ACTION: MATERIALIZE_BODY (Body / Object placeholder with text)
+            # ACTION: CONVERT_EXISTING SUBTITLE
+            elif sid == promoted_subtitle_shape_id:
+                final_action = ConversionAction.CONVERT_EXISTING
+                final_category = PlaceholderCategory.STANDALONE_SUBTITLE_BOX
+                final_status = PlaceholderStatus.SAFE_TO_CONVERT
+                final_rec = "Convert standalone subtitle text box into native slide subtitle placeholder."
+                final_reason = "Slide contains visual subtitle heading below title; converted to native subtitle placeholder."
+                final_conf_str = "HIGH"
+                semantic_role = "SUBTITLE"
+                proposed_ph_type = "subTitle"
+                conversion_basis = "HEADING_HIERARCHY_SUBTITLE"
+
+            # ACTION: CONVERT_EXISTING BODY
+            elif sid == promoted_body_shape_id:
+                final_action = ConversionAction.CONVERT_EXISTING
+                final_category = PlaceholderCategory.STANDALONE_BODY_BOX
+                final_status = PlaceholderStatus.SAFE_TO_CONVERT
+                final_rec = "Convert standalone body text box into native slide body placeholder."
+                final_reason = "Unambiguous primary body text box mapped to layout-supported native body placeholder."
+                final_conf_str = "HIGH"
+                semantic_role = "BODY"
+                proposed_ph_type = "body"
+                conversion_basis = "LAYOUT_SUPPORTED_BODY_CONTENT"
+
+            # ACTION: MATERIALIZE_BODY (Existing Native Body / Object placeholder with text)
             elif (
-                base_category in (PlaceholderCategory.BODY, PlaceholderCategory.OBJECT)
+                c["has_ph"]
+                and base_category in (PlaceholderCategory.BODY, PlaceholderCategory.OBJECT)
                 and has_text
             ):
                 if not (inherited.xfrm_emu or inherited.has_slide_xfrm):
+                    final_action = ConversionAction.MANUAL_REVIEW
                     final_category = base_category
                     final_status = PlaceholderStatus.MANUAL_REVIEW
                     final_rec = "Manual review required: geometry could not be resolved from layout or master."
                     final_reason = "Shape lacks local transform and layout/master has no matching geometry bounds."
                     final_conf_str = "LOW"
+                    semantic_role = base_category.value
+                    conversion_basis = "UNRESOLVED_INHERITANCE"
                 elif g_conf < 0.70:
+                    final_action = ConversionAction.PRESERVE_EXISTING
                     final_category = base_category
                     final_status = PlaceholderStatus.PRESERVED
                     final_rec = "Preserve body placeholder due to low confidence."
                     final_reason = f"Low confidence ({g_conf:.2f}); preserved placeholder."
                     final_conf_str = "LOW"
+                    semantic_role = base_category.value
+                    conversion_basis = "LOW_CONFIDENCE_GATE"
                 else:
+                    final_action = ConversionAction.CONVERT_EXISTING
                     final_category = base_category
                     final_status = PlaceholderStatus.SAFE_TO_CONVERT
                     final_rec = "Convert placeholder by materializing inherited geometry into self-contained shape."
                     final_reason = "Contains accessible text; materializing inherited geometry guarantees zero visual drift."
                     final_conf_str = "HIGH" if g_conf >= 0.85 else "MEDIUM"
+                    semantic_role = base_category.value
+                    conversion_basis = "GEOMETRY_MATERIALIZATION"
 
             # DEFAULT: PRESERVED shape
             else:
+                final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = base_category
                 final_status = base_status
                 final_rec = base_rec
                 final_reason = base_reason
                 final_conf_str = base_conf
+                semantic_role = base_category.value
+                conversion_basis = "DEFAULT_PRESERVATION"
 
             analysis = PlaceholderAnalysis(
                 slide_number=slide_number,
@@ -596,14 +907,51 @@ class PlaceholderClassifier:
                     "antigravity_coding_model": "Gemini 3.8 Flash High",
                     "slideguard_runtime_model": "Gemini 3.5",
                     "runtime_model_identifier": self.assistant.model_name
-                }
+                },
+                action=final_action,
+                semantic_role=semantic_role,
+                conversion_basis=conversion_basis,
+                is_group_child=is_group_child,
+                parent_group_id=parent_group_id,
+                before_placeholder_type=ph_type or "none",
+                proposed_placeholder_type=proposed_ph_type,
+                has_ph=c["has_ph"],
+                verified=False,
+                verification_category=None
             )
 
-            # Keep results consistent with placeholder evaluation: native placeholders and standalone title candidates
-            if c["has_ph"] or final_category == PlaceholderCategory.STANDALONE_TITLE_BOX:
+            # Return native placeholders, actionable shapes, or all objects when requested
+            if (
+                include_all_shapes
+                or c["has_ph"]
+                or final_category in (
+                    PlaceholderCategory.STANDALONE_TITLE_BOX,
+                    PlaceholderCategory.STANDALONE_SUBTITLE_BOX,
+                    PlaceholderCategory.STANDALONE_BODY_BOX
+                )
+                or sid in anim_title_candidate_ids
+            ):
                 results.append(analysis)
 
         return results
+
+    def audit_slide_objects(
+        self,
+        raw_slide,
+        slide_number: int,
+        animation_target_ids: Optional[List[int]] = None,
+        slide_height_pt: float = 540.0,
+        slide_width_pt: float = 720.0
+    ) -> List[PlaceholderAnalysis]:
+        """Performs exhaustive Option C audit of all objects on a slide."""
+        return self.analyze_slide_placeholders(
+            raw_slide=raw_slide,
+            slide_number=slide_number,
+            animation_target_ids=animation_target_ids,
+            slide_height_pt=slide_height_pt,
+            slide_width_pt=slide_width_pt,
+            include_all_shapes=True
+        )
 
     def analyze_shape(
         self,
@@ -650,7 +998,8 @@ class PlaceholderClassifier:
             is_pic=is_pic,
             is_tbl=is_tbl,
             is_chart=is_chart,
-            is_empty=is_empty
+            is_empty=is_empty,
+            has_ph=bool(ph_elems)
         )
 
         # Determine conversion safety and recommendation
@@ -767,9 +1116,21 @@ class PlaceholderClassifier:
         is_pic: bool,
         is_tbl: bool,
         is_chart: bool,
-        is_empty: bool
+        is_empty: bool,
+        has_ph: bool = True
     ) -> PlaceholderCategory:
         """Maps OpenXML placeholder attributes and contents to semantic category."""
+        if not has_ph:
+            if is_pic:
+                return PlaceholderCategory.PICTURE
+            if is_tbl:
+                return PlaceholderCategory.TABLE
+            if is_chart:
+                return PlaceholderCategory.CHART
+            if is_empty:
+                return PlaceholderCategory.EMPTY
+            return PlaceholderCategory.OTHER
+
         p_type = (raw_ph_type or "").lower()
 
         if p_type in ("title", "ctrtitle"):

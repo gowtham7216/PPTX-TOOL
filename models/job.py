@@ -100,6 +100,8 @@ class JobContext:
     ai_authoring_summary: Dict[str, Any] = field(default_factory=dict)
     # Phase 10 QA & Validation result
     qa_result: Optional[Any] = None
+    # Task 4 Comprehensive Placeholder Audit Report
+    task_4_placeholder_report: Optional[Dict[str, Any]] = None
 
     @property
     def duration_seconds(self) -> float:
