@@ -235,6 +235,191 @@ class RemediationService:
         context.stage = JobStage.REMEDIATED
         return actions
 
+    def remediate_reading_order(
+        self,
+        context: JobContext,
+        presentation: PresentationModel
+    ) -> List[RemediationAction]:
+        """Executes independent reading order remediation and saves candidate copy."""
+        if not context.user_approved_remediation:
+            raise PermissionError("Remediation cannot proceed without explicit user approval.")
+
+        context.stage = JobStage.REMEDIATING
+        logger.info("Executing independent Reading Order remediation for job %s", context.job_id)
+        ro_actions = self._execute_reading_order_step(context, presentation)
+        reordered_count = sum(1 for a in ro_actions if a.status == RemediationStatus.APPLIED)
+
+        step_1_action = RemediationAction(
+            action_id="rem_step_1",
+            rule_id="PIPELINE_STEP_1_READING_ORDER",
+            slide_number=0,
+            description=f"STEP 1: Reading Order Alignment. Evaluated and processed {len(presentation.slides)} slides in-place.",
+            status=RemediationStatus.APPLIED if reordered_count > 0 else RemediationStatus.SKIPPED,
+            is_user_approved=True,
+            confidence=0.95
+        )
+        context.remediation_actions.append(step_1_action)
+
+        if context.candidate_file and presentation.raw_presentation:
+            try:
+                self.writer.write(presentation, context.candidate_file)
+                logger.info("Saved candidate working copy to %s", context.candidate_file)
+            except Exception as e:
+                logger.error("Failed to write candidate presentation: %s", e)
+
+        context.stage = JobStage.REMEDIATED
+        return ro_actions
+
+    def remediate_placeholders(
+        self,
+        context: JobContext,
+        presentation: PresentationModel
+    ) -> List[RemediationAction]:
+        """Executes independent native placeholder conversion and saves candidate copy."""
+        if not context.user_approved_remediation:
+            raise PermissionError("Remediation cannot proceed without explicit user approval.")
+
+        context.stage = JobStage.REMEDIATING
+        logger.info("Executing independent Placeholder Conversion remediation for job %s", context.job_id)
+        ph_actions = self._execute_placeholder_step(context, presentation)
+        converted_count = sum(1 for a in ph_actions if a.status == RemediationStatus.APPLIED)
+
+        step_3_action = RemediationAction(
+            action_id="rem_step_3",
+            rule_id="PIPELINE_STEP_3_PLACEHOLDERS",
+            slide_number=0,
+            description=f"STEP 3: Native Placeholder Conversion. Evaluated and processed {len(presentation.slides)} slides in-place.",
+            status=RemediationStatus.APPLIED if converted_count > 0 else RemediationStatus.SKIPPED,
+            is_user_approved=True,
+            confidence=0.95,
+            remediated_state=context.task_4_placeholder_report or {}
+        )
+        context.remediation_actions.append(step_3_action)
+
+        if context.candidate_file and presentation.raw_presentation:
+            try:
+                self.writer.write(presentation, context.candidate_file)
+                logger.info("Saved candidate working copy to %s", context.candidate_file)
+            except Exception as e:
+                logger.error("Failed to write candidate presentation: %s", e)
+
+        context.stage = JobStage.REMEDIATED
+        return ph_actions
+
+    def remediate_alt_text_and_decorative(
+        self,
+        context: JobContext,
+        presentation: PresentationModel
+    ) -> List[RemediationAction]:
+        """Executes independent alt text and decorative visuals remediation and saves candidate copy."""
+        if not context.user_approved_remediation:
+            raise PermissionError("Remediation cannot proceed without explicit user approval.")
+
+        context.stage = JobStage.REMEDIATING
+        logger.info("Executing independent Alt Text & Decorative remediation for job %s", context.job_id)
+        access_actions = self._execute_accessibility_step(context, presentation)
+        remediated_count = sum(1 for a in access_actions if a.status == RemediationStatus.APPLIED)
+
+        step_5_action = RemediationAction(
+            action_id="rem_step_5",
+            rule_id="PIPELINE_STEP_5_ACCESSIBILITY",
+            slide_number=0,
+            description=(
+                f"STEP 5: Accessibility Validation & Safe Remediation. Safely remediated {remediated_count} issues in-place."
+                if remediated_count > 0
+                else "STEP 5: Accessibility Validation & Safe Remediation. No safe remediation required or issues flagged for manual review."
+            ),
+            status=RemediationStatus.APPLIED if remediated_count > 0 else RemediationStatus.SKIPPED,
+            is_user_approved=True,
+            confidence=0.95
+        )
+        context.remediation_actions.append(step_5_action)
+
+        if context.candidate_file and presentation.raw_presentation:
+            try:
+                self.writer.write(presentation, context.candidate_file)
+                logger.info("Saved candidate working copy to %s", context.candidate_file)
+            except Exception as e:
+                logger.error("Failed to write candidate presentation: %s", e)
+
+        context.stage = JobStage.REMEDIATED
+        return access_actions
+
+    def remediate_selective_ungrouping(
+        self,
+        context: JobContext,
+        presentation: PresentationModel
+    ) -> List[RemediationAction]:
+        """Executes independent selective ungrouping remediation and saves candidate copy."""
+        if not context.user_approved_remediation:
+            raise PermissionError("Remediation cannot proceed without explicit user approval.")
+
+        context.stage = JobStage.REMEDIATING
+        logger.info("Executing independent Selective Ungrouping remediation for job %s", context.job_id)
+        grp_actions = self._execute_ungrouping_step(context, presentation)
+        ungrouped_count = sum(1 for a in grp_actions if a.status == RemediationStatus.APPLIED)
+
+        step_2_action = RemediationAction(
+            action_id="rem_step_2",
+            rule_id="PIPELINE_STEP_2_UNGROUPING",
+            slide_number=0,
+            description=f"STEP 2: Selective Ungrouping. Evaluated and processed {len(presentation.slides)} slides in-place.",
+            status=RemediationStatus.APPLIED if ungrouped_count > 0 else RemediationStatus.SKIPPED,
+            is_user_approved=True,
+            confidence=0.95
+        )
+        context.remediation_actions.append(step_2_action)
+
+        if context.candidate_file and presentation.raw_presentation:
+            try:
+                self.writer.write(presentation, context.candidate_file)
+                logger.info("Saved candidate working copy to %s", context.candidate_file)
+            except Exception as e:
+                logger.error("Failed to write candidate presentation: %s", e)
+
+        context.stage = JobStage.REMEDIATED
+        return grp_actions
+
+    def remediate_list_semantics(
+        self,
+        context: JobContext,
+        presentation: PresentationModel
+    ) -> List[RemediationAction]:
+        """Executes independent list semantics remediation and saves candidate copy."""
+        if not context.user_approved_remediation:
+            raise PermissionError("Remediation cannot proceed without explicit user approval.")
+
+        context.stage = JobStage.REMEDIATING
+        logger.info("Executing independent List Semantics remediation for job %s", context.job_id)
+        list_actions = self._execute_list_step(context, presentation)
+        remediated_count = sum(1 for a in list_actions if a.status == RemediationStatus.APPLIED)
+
+        step_4_action = RemediationAction(
+            action_id="rem_step_4",
+            rule_id="PIPELINE_STEP_4_LISTS",
+            slide_number=0,
+            description=(
+                f"STEP 4: List Semantics & Numbering. Remediated {remediated_count} list items in-place."
+                if remediated_count > 0
+                else "STEP 4: List Semantics & Numbering. No list remediation required; lists compliant or preserved."
+            ),
+            status=RemediationStatus.APPLIED if remediated_count > 0 else RemediationStatus.SKIPPED,
+            is_user_approved=True,
+            confidence=0.95
+        )
+        context.remediation_actions.append(step_4_action)
+
+        if context.candidate_file and presentation.raw_presentation:
+            try:
+                self.writer.write(presentation, context.candidate_file)
+                logger.info("Saved candidate working copy to %s", context.candidate_file)
+            except Exception as e:
+                logger.error("Failed to write candidate presentation: %s", e)
+
+        context.stage = JobStage.REMEDIATED
+        return list_actions
+
+
     def _execute_reading_order_step(
         self,
         context: JobContext,
