@@ -180,7 +180,6 @@ class AppController:
             progress_callback(1, 2, "Aligning reading order across slides...")
 
         self.remediator.remediate_reading_order(context, self.current_presentation)
-        self._export_candidate_pptx(context)
         return self._finalize_candidate_and_export(context)
 
     def execute_placeholder_remediation(
@@ -193,13 +192,15 @@ class AppController:
             raise PermissionError("User approval is required before running remediation.")
 
         if self.current_presentation is None:
-            self.current_presentation = self.reader.read(context.working_file)
+            if context.candidate_file and context.candidate_file.exists():
+                self.current_presentation = self.reader.read(context.candidate_file)
+            else:
+                self.current_presentation = self.reader.read(context.working_file)
 
         if progress_callback:
             progress_callback(1, 2, "Converting shapes to native placeholders...")
 
         self.remediator.remediate_placeholders(context, self.current_presentation)
-        self._export_candidate_pptx(context)
         return self._finalize_candidate_and_export(context)
 
     def execute_alt_text_remediation(
@@ -212,13 +213,15 @@ class AppController:
             raise PermissionError("User approval is required before running remediation.")
 
         if self.current_presentation is None:
-            self.current_presentation = self.reader.read(context.working_file)
+            if context.candidate_file and context.candidate_file.exists():
+                self.current_presentation = self.reader.read(context.candidate_file)
+            else:
+                self.current_presentation = self.reader.read(context.working_file)
 
         if progress_callback:
             progress_callback(1, 2, "Applying alt text and marking decorative visuals...")
 
         self.remediator.remediate_alt_text_and_decorative(context, self.current_presentation)
-        self._export_candidate_pptx(context)
         return self._finalize_candidate_and_export(context)
 
     def execute_ungrouping_remediation(
@@ -231,13 +234,15 @@ class AppController:
             raise PermissionError("User approval is required before running remediation.")
 
         if self.current_presentation is None:
-            self.current_presentation = self.reader.read(context.working_file)
+            if context.candidate_file and context.candidate_file.exists():
+                self.current_presentation = self.reader.read(context.candidate_file)
+            else:
+                self.current_presentation = self.reader.read(context.working_file)
 
         if progress_callback:
             progress_callback(1, 2, "Selectively ungrouping shapes for assistive access...")
 
         self.remediator.remediate_selective_ungrouping(context, self.current_presentation)
-        self._export_candidate_pptx(context)
         return self._finalize_candidate_and_export(context)
 
     def execute_list_remediation(
@@ -250,13 +255,15 @@ class AppController:
             raise PermissionError("User approval is required before running remediation.")
 
         if self.current_presentation is None:
-            self.current_presentation = self.reader.read(context.working_file)
+            if context.candidate_file and context.candidate_file.exists():
+                self.current_presentation = self.reader.read(context.candidate_file)
+            else:
+                self.current_presentation = self.reader.read(context.working_file)
 
         if progress_callback:
             progress_callback(1, 2, "Normalizing list semantics and numbering hierarchy...")
 
         self.remediator.remediate_list_semantics(context, self.current_presentation)
-        self._export_candidate_pptx(context)
         return self._finalize_candidate_and_export(context)
 
     def generate_reports(self, context: JobContext) -> JobContext:
@@ -279,19 +286,36 @@ class AppController:
 
             try:
                 source_p = getattr(context, "source_file", None) or context.original_file
-                dest_dir = source_p.parent if source_p.parent.exists() else context.workspace_dir
-                stem = source_p.stem
-                final_rep = self.get_collision_safe_path(
-                    base_dir=dest_dir,
-                    stem=stem,
-                    suffix="_SlideGuard_Report",
-                    ext=".md",
-                    forbidden_paths=[source_p]
+                source_resolved = source_p.resolve() if source_p else None
+
+                # Reuse existing final_report_file if set, belongs to this job, and is not the source file
+                final_rep = context.final_report_file
+                is_safe_rep = (
+                    final_rep is not None
+                    and str(final_rep).strip() != ""
+                    and (source_resolved is None or final_rep.resolve() != source_resolved)
                 )
-                import shutil
-                shutil.copy2(context.reports_dir / f"{report_name}.md", final_rep)
-                context.final_report_file = final_rep
-                logger.info("Exported audit report: %s", final_rep)
+
+                if not is_safe_rep:
+                    dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
+                    stem = source_p.stem if source_p else "presentation"
+                    final_rep = self.get_collision_safe_path(
+                        base_dir=dest_dir,
+                        stem=stem,
+                        suffix="_SlideGuard_Report",
+                        ext=".md",
+                        forbidden_paths=[source_p] if source_p else None
+                    )
+
+                md_source = context.reports_dir / f"{report_name}.md"
+                if md_source.exists():
+                    import shutil
+                    if source_resolved and final_rep.resolve() == source_resolved:
+                        logger.error("Attempted to overwrite source presentation with report: %s. Aborting report export.", source_p)
+                    else:
+                        shutil.copy2(md_source, final_rep)
+                        context.final_report_file = final_rep
+                        logger.info("Exported audit report: %s", final_rep)
             except Exception as err:
                 logger.warning("Report export warning: %s", err)
         return context
@@ -321,18 +345,33 @@ class AppController:
             try:
                 import shutil
                 source_p = getattr(context, "source_file", None) or context.original_file
-                dest_dir = source_p.parent if source_p.parent.exists() else context.workspace_dir
-                stem = source_p.stem
-                final_pptx = self.get_collision_safe_path(
-                    base_dir=dest_dir,
-                    stem=stem,
-                    suffix="_SlideGuard_Remediated",
-                    ext=".pptx",
-                    forbidden_paths=[source_p]
+                source_resolved = source_p.resolve() if source_p else None
+
+                # Reuse existing final_output_file if set, belongs to this job, and is not the source file
+                final_pptx = context.final_output_file
+                is_safe_pptx = (
+                    final_pptx is not None
+                    and str(final_pptx).strip() != ""
+                    and (source_resolved is None or final_pptx.resolve() != source_resolved)
                 )
-                shutil.copy2(context.candidate_file, final_pptx)
-                context.final_output_file = final_pptx
-                logger.info("Exported production remediated presentation: %s", final_pptx)
+
+                if not is_safe_pptx:
+                    dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
+                    stem = source_p.stem if source_p else "presentation"
+                    final_pptx = self.get_collision_safe_path(
+                        base_dir=dest_dir,
+                        stem=stem,
+                        suffix="_SlideGuard_Remediated",
+                        ext=".pptx",
+                        forbidden_paths=[source_p] if source_p else None
+                    )
+
+                if source_resolved and final_pptx.resolve() == source_resolved:
+                    logger.error("Attempted to overwrite source presentation: %s. Aborting export.", source_p)
+                else:
+                    shutil.copy2(context.candidate_file, final_pptx)
+                    context.final_output_file = final_pptx
+                    logger.info("Exported production remediated presentation: %s", final_pptx)
             except Exception as e:
                 logger.warning("Intermediate candidate export warning: %s", e)
 
@@ -443,35 +482,63 @@ class AppController:
         # Phase 11 Production Output Management:
         try:
             source_p = getattr(context, "source_file", None) or context.original_file
-            dest_dir = source_p.parent if source_p.parent.exists() else context.workspace_dir
-            stem = source_p.stem
+            source_resolved = source_p.resolve() if source_p else None
 
-            final_pptx = self.get_collision_safe_path(
-                base_dir=dest_dir,
-                stem=stem,
-                suffix="_SlideGuard_Remediated",
-                ext=".pptx",
-                forbidden_paths=[source_p]
+            # Reuse existing final_output_file if set, belongs to this job, and is not the source file
+            final_pptx = context.final_output_file
+            is_safe_pptx = (
+                final_pptx is not None
+                and str(final_pptx).strip() != ""
+                and (source_resolved is None or final_pptx.resolve() != source_resolved)
             )
+
+            if not is_safe_pptx:
+                dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
+                stem = source_p.stem if source_p else "presentation"
+                final_pptx = self.get_collision_safe_path(
+                    base_dir=dest_dir,
+                    stem=stem,
+                    suffix="_SlideGuard_Remediated",
+                    ext=".pptx",
+                    forbidden_paths=[source_p] if source_p else None
+                )
 
             if context.candidate_file and context.candidate_file.exists():
                 import shutil
-                shutil.copy2(context.candidate_file, final_pptx)
-                context.final_output_file = final_pptx
-                logger.info("Exported production remediated presentation: %s", final_pptx)
+                if source_resolved and final_pptx.resolve() == source_resolved:
+                    logger.error("Attempted to overwrite source presentation: %s. Aborting export.", source_p)
+                else:
+                    shutil.copy2(context.candidate_file, final_pptx)
+                    context.final_output_file = final_pptx
+                    logger.info("Exported production remediated presentation: %s", final_pptx)
 
-            if context.reports_dir and (context.reports_dir / "final_report.md").exists():
+            # Reuse existing final_report_file if set, belongs to this job, and is not the source file
+            final_rep = context.final_report_file
+            is_safe_rep = (
+                final_rep is not None
+                and str(final_rep).strip() != ""
+                and (source_resolved is None or final_rep.resolve() != source_resolved)
+            )
+
+            if not is_safe_rep:
+                dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
+                stem = source_p.stem if source_p else "presentation"
                 final_rep = self.get_collision_safe_path(
                     base_dir=dest_dir,
                     stem=stem,
                     suffix="_SlideGuard_Report",
                     ext=".md",
-                    forbidden_paths=[source_p]
+                    forbidden_paths=[source_p] if source_p else None
                 )
+
+            if context.reports_dir and (context.reports_dir / "final_report.md").exists():
                 import shutil
-                shutil.copy2(context.reports_dir / "final_report.md", final_rep)
-                context.final_report_file = final_rep
-                logger.info("Exported production remediation report: %s", final_rep)
+                if source_resolved and final_rep.resolve() == source_resolved:
+                    logger.error("Attempted to overwrite source presentation with report: %s. Aborting report export.", source_p)
+                else:
+                    shutil.copy2(context.reports_dir / "final_report.md", final_rep)
+                    context.final_report_file = final_rep
+                    logger.info("Exported production remediation report: %s", final_rep)
         except Exception as err:
             logger.warning("Production export non-fatal warning: %s", err)
 
