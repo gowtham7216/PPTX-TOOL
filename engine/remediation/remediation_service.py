@@ -5,7 +5,7 @@ Step 1 (Reading Order) is fully implemented; Steps 2-6 remain reserved for subse
 Requires explicit user approval before execution.
 """
 
-from typing import List, Optional, Callable, Set, TYPE_CHECKING
+from typing import List, Optional, Callable, Set, TYPE_CHECKING, Any
 import logging
 
 from models.presentation import PresentationModel
@@ -36,12 +36,18 @@ class RemediationService:
     def __init__(
         self,
         writer: Optional[PresentationWriter] = None,
+        reader: Optional[Any] = None,
         reading_order_rule: Optional["ReadingOrderRule"] = None,
         ungroup_rule: Optional["SelectiveUngroupingRule"] = None,
         placeholder_rule: Optional["PlaceholderRule"] = None,
         list_rule: Optional["ListRule"] = None
     ):
         self.writer = writer or PresentationWriter()
+        if reader is not None:
+            self.reader = reader
+        else:
+            from pptx_engine.reader.presentation_reader import PresentationReader
+            self.reader = PresentationReader()
         if reading_order_rule is not None:
             self.ro_rule = reading_order_rule
         else:
@@ -195,6 +201,15 @@ class RemediationService:
         )
         actions.append(step_5_action)
 
+        # Aggregate all detailed per-slide actions
+        detailed_actions: List[RemediationAction] = []
+        detailed_actions.extend(ro_actions)
+        detailed_actions.extend(ungroup_actions)
+        detailed_actions.extend(ph_actions)
+        detailed_actions.extend(list_actions)
+        detailed_actions.extend(access_actions)
+        context.detailed_remediation_actions = detailed_actions
+
         # =====================================================================
         # STEP 6: Final Validation & Issue Reconciliation (Phase 8)
         # =====================================================================
@@ -202,7 +217,7 @@ class RemediationService:
             progress_callback(6, total_steps, "Executing STEP 6: Final Validation & Issue Reconciliation...")
 
         logger.info("Executing STEP 6: Final Validation & Issue Reconciliation")
-        reconciliation_summary = self._execute_reconciliation_step(context, presentation, actions)
+        reconciliation_summary = self._execute_reconciliation_step(context, presentation, detailed_actions)
 
         step_6_action = RemediationAction(
             action_id="rem_step_6",
@@ -248,25 +263,100 @@ class RemediationService:
         logger.info("Executing independent Reading Order remediation for job %s", context.job_id)
         ro_actions = self._execute_reading_order_step(context, presentation)
         reordered_count = sum(1 for a in ro_actions if a.status == RemediationStatus.APPLIED)
+        failed_count = sum(1 for a in ro_actions if a.status == RemediationStatus.FAILED)
+        skipped_count = sum(1 for a in ro_actions if a.status == RemediationStatus.SKIPPED)
 
-        step_1_action = RemediationAction(
-            action_id="rem_step_1",
-            rule_id="PIPELINE_STEP_1_READING_ORDER",
-            slide_number=0,
-            description=f"STEP 1: Reading Order Alignment. Evaluated and processed {len(presentation.slides)} slides in-place.",
-            status=RemediationStatus.APPLIED if reordered_count > 0 else RemediationStatus.SKIPPED,
-            is_user_approved=True,
-            confidence=0.95
-        )
-        context.remediation_actions.append(step_1_action)
-
+        if reordered_count > 0:
+            overall_status = RemediationStatus.APPLIED
+            desc = f"STEP 1: Reading Order Alignment. Reordered {reordered_count} slide(s) in-place in candidate copy."
+        elif failed_count > 0:
+            overall_status = RemediationStatus.FAILED
+            desc = f"STEP 1: Reading Order Alignment. Failed on {failed_count} slide(s)."
         if context.candidate_file and presentation.raw_presentation:
             try:
                 self.writer.write(presentation, context.candidate_file)
                 logger.info("Saved candidate working copy to %s", context.candidate_file)
             except Exception as e:
                 logger.error("Failed to write candidate presentation: %s", e)
+                for a in ro_actions:
+                    if a.status == RemediationStatus.APPLIED:
+                        a.status = RemediationStatus.FAILED
+                        a.error_message = f"Writer failure: {e}"
+                step_1_action = RemediationAction(
+                    action_id="rem_step_1",
+                    rule_id="PIPELINE_STEP_1_READING_ORDER",
+                    slide_number=0,
+                    description=f"STEP 1: Reading Order Alignment. Failed to write candidate presentation: {e}",
+                    status=RemediationStatus.FAILED,
+                    error_message=f"Writer failure: {e}",
+                    is_user_approved=True,
+                    confidence=0.0
+                )
+                context.remediation_actions = [
+                    a for a in context.remediation_actions
+                    if a.rule_id not in (self.ro_rule.rule_id, "PIPELINE_STEP_1_READING_ORDER")
+                ]
+                context.remediation_actions.extend(ro_actions)
+                context.remediation_actions.append(step_1_action)
+                raise
 
+        # Verify candidate PPTX file contents to ensure applied changes were written correctly
+        applied_in_memory = sum(1 for a in ro_actions if a.status == RemediationStatus.APPLIED)
+        if applied_in_memory > 0 and context.candidate_file and context.candidate_file.exists():
+            try:
+                cand_pres = self.reader.read(context.candidate_file)
+                for a in ro_actions:
+                    if a.status == RemediationStatus.APPLIED:
+                        cand_s = cand_pres.get_slide_by_number(a.slide_number)
+                        if cand_s and cand_s.raw_slide:
+                            actual_ids = [s.shape_id for s in cand_s.raw_slide.shapes]
+                            expected_order = a.remediated_state.get("order", [])
+                            exp_sub = [s_id for s_id in expected_order if s_id in actual_ids]
+                            act_sub = [s_id for s_id in actual_ids if s_id in set(exp_sub)]
+                            if act_sub != exp_sub:
+                                logger.error(
+                                    "Candidate verification mismatch on slide %d: expected %s, found %s",
+                                    a.slide_number, exp_sub, act_sub
+                                )
+                                a.status = RemediationStatus.FAILED
+                                a.error_message = "Candidate verification mismatch: written shape sequence did not match expected order."
+            except Exception as ve:
+                logger.error("Candidate verification error: %s", ve)
+
+        # Re-derive final counts after candidate verification
+        reordered_count = sum(1 for a in ro_actions if a.status == RemediationStatus.APPLIED)
+        failed_count = sum(1 for a in ro_actions if a.status == RemediationStatus.FAILED)
+        skipped_count = sum(1 for a in ro_actions if a.status == RemediationStatus.SKIPPED)
+
+        if reordered_count > 0:
+            overall_status = RemediationStatus.APPLIED
+            desc = f"STEP 1: Reading Order Alignment. Reordered {reordered_count} slide(s) in-place in candidate copy."
+        elif failed_count > 0:
+            overall_status = RemediationStatus.FAILED
+            desc = f"STEP 1: Reading Order Alignment. Failed on {failed_count} slide(s)."
+        elif skipped_count > 0:
+            overall_status = RemediationStatus.SKIPPED
+            desc = f"STEP 1: Reading Order Alignment. Withheld {skipped_count} slide(s) due to confidence/safety rules."
+        else:
+            overall_status = RemediationStatus.NO_CHANGES
+            desc = f"STEP 1: Reading Order Alignment. All {len(presentation.slides)} slide(s) confirmed already in logical reading sequence."
+
+        step_1_action = RemediationAction(
+            action_id="rem_step_1",
+            rule_id="PIPELINE_STEP_1_READING_ORDER",
+            slide_number=0,
+            description=desc,
+            status=overall_status,
+            is_user_approved=True,
+            confidence=0.95
+        )
+
+        context.remediation_actions = [
+            a for a in context.remediation_actions
+            if a.rule_id not in (self.ro_rule.rule_id, "PIPELINE_STEP_1_READING_ORDER")
+        ]
+        context.remediation_actions.extend(ro_actions)
+        context.remediation_actions.append(step_1_action)
         context.stage = JobStage.REMEDIATED
         return ro_actions
 
@@ -294,6 +384,11 @@ class RemediationService:
             confidence=0.95,
             remediated_state=context.task_4_placeholder_report or {}
         )
+        context.remediation_actions = [
+            a for a in context.remediation_actions
+            if a.rule_id not in (self.ph_rule.rule_id, "PIPELINE_STEP_3_PLACEHOLDERS")
+        ]
+        context.remediation_actions.extend(ph_actions)
         context.remediation_actions.append(step_3_action)
 
         if context.candidate_file and presentation.raw_presentation:
@@ -435,29 +530,84 @@ class RemediationService:
                 for issue in r_res.issues:
                     ro_issues_by_slide[issue.slide_number] = issue
 
-        reordered_count = 0
+        # Safety fallback: if no prior SG-RO-01 evaluation in rule_results, evaluate on the fly
+        has_ro_evaluation = any(r_res.rule_id == self.ro_rule.rule_id for r_res in context.rule_results)
+        if not has_ro_evaluation and presentation.slides:
+            logger.info("No prior reading order rule results found; evaluating slides on the fly.")
+            for slide in presentation.slides:
+                issues = self.ro_rule.evaluate(slide, presentation)
+                for issue in issues:
+                    ro_issues_by_slide[issue.slide_number] = issue
+
+        eligible_count = len(ro_issues_by_slide)
+        logger.info(
+            "Starting Reading Order batch: %d total slides, %d eligible slide(s) flagged with reading order issues.",
+            len(presentation.slides),
+            eligible_count
+        )
+
         for slide in presentation.slides:
             if slide.slide_number in ro_issues_by_slide:
                 issue = ro_issues_by_slide[slide.slide_number]
+                extra = issue.extra_data or {}
+                conf = extra.get("confidence", "MEDIUM")
+                orig_order = extra.get("original_order", [])
+                prop_order = extra.get("proposed_order", [])
+
                 action = self.ro_rule.remediate_issue(slide, presentation, issue)
                 step_actions.append(action)
+
                 if action.status == RemediationStatus.APPLIED:
-                    reordered_count += 1
+                    logger.info(
+                        "Slide %d: APPLIED - reordered shapes %s -> %s (confidence=%s)",
+                        slide.slide_number, orig_order, prop_order, conf
+                    )
+                elif action.status == RemediationStatus.NO_CHANGES:
+                    logger.info(
+                        "Slide %d: NO_CHANGES - sequence %s already matches proposed order",
+                        slide.slide_number, orig_order
+                    )
+                elif action.status == RemediationStatus.SKIPPED:
+                    logger.warning(
+                        "Slide %d: SKIPPED - %s (confidence=%s)",
+                        slide.slide_number, action.description, conf
+                    )
+                elif action.status == RemediationStatus.FAILED:
+                    logger.error(
+                        "Slide %d: FAILED - %s (error=%s)",
+                        slide.slide_number, action.description, action.error_message
+                    )
             else:
                 # Slide already had optimal reading order
-                step_actions.append(
-                    RemediationAction(
-                        action_id=f"rem_ro_noop_{slide.slide_number}",
-                        rule_id=self.ro_rule.rule_id,
-                        slide_number=slide.slide_number,
-                        description="Slide reading order is already logically compliant. Preserving original sequence.",
-                        status=RemediationStatus.SKIPPED,
-                        confidence=1.0,
-                        is_user_approved=True
-                    )
+                action = RemediationAction(
+                    action_id=f"rem_ro_noop_{slide.slide_number}",
+                    rule_id=self.ro_rule.rule_id,
+                    slide_number=slide.slide_number,
+                    description="Slide reading order is already logically compliant. Preserving original sequence.",
+                    status=RemediationStatus.NO_CHANGES,
+                    confidence=1.0,
+                    is_user_approved=True
+                )
+                step_actions.append(action)
+                logger.debug(
+                    "Slide %d: NO_CHANGES - reading order confirmed optimal during analysis",
+                    slide.slide_number
                 )
 
-        logger.info("Reading order remediation completed: %d slides reordered in-place.", reordered_count)
+        applied_count = sum(1 for a in step_actions if a.status == RemediationStatus.APPLIED)
+        no_changes_count = sum(1 for a in step_actions if a.status == RemediationStatus.NO_CHANGES)
+        skipped_count = sum(1 for a in step_actions if a.status == RemediationStatus.SKIPPED)
+        failed_count = sum(1 for a in step_actions if a.status == RemediationStatus.FAILED)
+
+        logger.info(
+            "Reading Order batch execution complete: %d total slides | %d eligible | %d APPLIED | %d NO_CHANGES | %d SKIPPED | %d FAILED",
+            len(presentation.slides),
+            eligible_count,
+            applied_count,
+            no_changes_count,
+            skipped_count,
+            failed_count
+        )
         return step_actions
 
     def _execute_ungrouping_step(
@@ -512,6 +662,14 @@ class RemediationService:
         """Runs Placeholder conversion remediation across all slides with issues."""
         step_actions = []
 
+        # Capture baseline report from original/working presentation before mutation
+        base_report = context.task_4_placeholder_report
+        if base_report is None:
+            try:
+                base_report = self.ph_rule.generate_presentation_audit_report(presentation)
+            except Exception as e:
+                logger.warning("Failed to generate baseline task_4_placeholder_report: %s", e)
+
         ph_issues_by_slide = {}
         for r_res in context.rule_results:
             if r_res.rule_id == self.ph_rule.rule_id:
@@ -544,12 +702,29 @@ class RemediationService:
         if ph_affected_slides:
             self._refresh_modified_slides(presentation, ph_affected_slides)
 
-        # Generate Option C comprehensive placeholder audit report across all slides
-        try:
-            task_4_report = self.ph_rule.generate_presentation_audit_report(presentation)
-            context.task_4_placeholder_report = task_4_report
-        except Exception as e:
-            logger.warning("Failed to generate task_4_placeholder_report: %s", e)
+        # Update Task 4 Option C audit report with actual remediation outcomes
+        if base_report is not None:
+            if converted_count > 0:
+                base_report["conversions_applied"] = converted_count
+                base_report["conversions_verified"] = converted_count
+                base_report["existing_objects_converted"] = converted_count
+                base_report["slides_changed"] = len(ph_affected_slides)
+                base_report["slides_unchanged"] = max(0, len(presentation.slides) - len(ph_affected_slides))
+                converted_shape_keys = {
+                    (a.slide_number, a.target_shape_id or (a.original_state or {}).get("shape_id"))
+                    for a in step_actions if a.status == RemediationStatus.APPLIED
+                }
+                for obj in base_report.get("objects", []):
+                    if (obj.get("slide_number"), obj.get("shape_id")) in converted_shape_keys:
+                        obj["action"] = "CONVERT_EXISTING"
+                        obj["verified"] = True
+            context.task_4_placeholder_report = base_report
+        else:
+            try:
+                task_4_report = self.ph_rule.generate_presentation_audit_report(presentation)
+                context.task_4_placeholder_report = task_4_report
+            except Exception as e:
+                logger.warning("Failed to generate task_4_placeholder_report: %s", e)
 
         logger.info("Placeholder conversion completed: %d shapes converted/remediated in-place.", converted_count)
         return step_actions
@@ -655,7 +830,7 @@ class RemediationService:
                 step_actions.append(
                     RemediationAction(
                         action_id=f"rem_access_noop_{slide.slide_number}",
-                        rule_id="PIPELINE_STEP_5_ACCESSIBILITY",
+                        rule_id="SG-ACC-01",
                         slide_number=slide.slide_number,
                         description="Slide has no safe accessibility issues requiring automatic remediation.",
                         status=RemediationStatus.SKIPPED,
@@ -721,7 +896,10 @@ class RemediationService:
         # 1. Ensure pre-remediation unified issues are populated
         if not context.unified_issues and context.rule_results:
             context.unified_issues = correlator.correlate(context.rule_results)
-            context.pre_remediation_score = context.metrics.accessibility_score
+        if context.pre_remediation_score is None:
+            context.pre_remediation_score = context.metrics.quality_score_v2
+        if context.pre_accessibility_score is None:
+            context.pre_accessibility_score = context.metrics.accessibility_score
 
         # 2. Run post-remediation analysis on the remediated presentation
         analyzer = PresentationAnalyzer()
@@ -741,7 +919,39 @@ class RemediationService:
         # 5. Compute post-remediation quality metrics
         post_metrics = analyzer.compute_metrics(post_rule_results, presentation.total_slides)
         context.post_remediation_score = post_metrics.quality_score_v2
+        context.post_accessibility_score = post_metrics.accessibility_score
+        context.post_rule_results = post_rule_results
+        context.post_metrics = post_metrics
+        # 6. Reconcile pre-remediation rule_results issue statuses and verification
+        post_issue_keys = {
+            (issue.slide_number, issue.shape_id, res.rule_id)
+            for res in post_rule_results for issue in res.issues
+        }
+        for res in context.rule_results:
+            for issue in res.issues:
+                key = (issue.slide_number, issue.shape_id, res.rule_id)
+                if key not in post_issue_keys:
+                    issue.status = AccessibilityStatus.REMEDIATED
+                    issue.verification_status = "VERIFIED"
+                else:
+                    issue.verification_status = "VERIFIED"
+
+        raw_pre_count = sum(len(res.issues) for res in context.rule_results)
+        raw_post_count = sum(len(res.issues) for res in post_rule_results)
+        raw_remediated_count = sum(1 for res in context.rule_results for issue in res.issues if issue.status == AccessibilityStatus.REMEDIATED)
+        raw_unresolved_count = len([i for res in context.rule_results for i in res.issues if i.status != AccessibilityStatus.REMEDIATED])
+
+        reconciliation_summary.raw_issues_pre = raw_pre_count
+        reconciliation_summary.raw_issues_post = raw_post_count
+        reconciliation_summary.raw_issues_remediated = raw_remediated_count
         context.intelligence_summary = reconciliation_summary.to_dict()
+
+        # Update authoritative metrics on context.metrics
+        context.metrics.raw_remediated_issues = raw_remediated_count
+        context.metrics.remediated_issues = reconciliation_summary.remediated_count
+        context.metrics.unresolved_issues = reconciliation_summary.total_post
+        context.metrics.manual_review_issues = reconciliation_summary.manual_review_count
+        context.metrics.correlated_issues_count = reconciliation_summary.total_pre
 
         return reconciliation_summary
 

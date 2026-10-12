@@ -29,6 +29,32 @@ class ReportGenerator:
         v = context.verification_result
 
         stage_val = getattr(context.stage, "value", str(context.stage))
+
+        # Section 1: Executive Summary & Quality Metrics
+        pre_q2 = context.pre_remediation_score if context.pre_remediation_score is not None else m.quality_score_v2
+        post_q2 = context.post_remediation_score if context.post_remediation_score is not None else (m.quality_score_v2 if (stage_val == "COMPLETED" or context.remediation_actions) else None)
+        pre_raw = getattr(context, "pre_accessibility_score", None) if getattr(context, "pre_accessibility_score", None) is not None else m.accessibility_score
+        post_raw = getattr(context, "post_accessibility_score", None)
+        post_m = getattr(context, "post_metrics", None)
+        intel_summary = getattr(context, "intelligence_summary", None) or {}
+
+        pre_q2_str = f"{pre_q2:.1f} / 100" if pre_q2 is not None else "N/A"
+        post_q2_str = f"{post_q2:.1f} / 100" if post_q2 is not None else "Pending Remediation"
+        pre_raw_str = f"{pre_raw:.1f} / 100" if pre_raw is not None else "N/A"
+        post_raw_str = f"{post_raw:.1f} / 100" if post_raw is not None else "Pending Remediation"
+
+        total_unique_pre = m.correlated_issues_count or (len(context.unified_issues) if context.unified_issues else m.total_issues)
+        total_unique_post = intel_summary.get("total_post", m.unresolved_issues) if intel_summary else m.unresolved_issues
+        unique_remediated = intel_summary.get("remediated_count", m.remediated_issues)
+        unique_unresolved = total_unique_post
+
+        raw_pre_count = m.total_issues
+        raw_post_count = post_m.total_issues if post_m else (raw_pre_count - m.raw_remediated_issues if m.raw_remediated_issues else raw_pre_count)
+        raw_remediated_count = m.raw_remediated_issues or max(0, raw_pre_count - raw_post_count)
+
+        total_post_issues_str = str(unique_unresolved) if stage_val == "COMPLETED" or context.remediation_actions else "Pending"
+        remediated_str = str(unique_remediated)
+
         md_lines = [
             f"# SlideGuard Accessibility & Integrity Report",
             f"",
@@ -41,21 +67,32 @@ class ReportGenerator:
             f"",
             f"## 1. Executive Summary & Quality Metrics",
             f"",
-            f"| Metric | Value |",
-            f"|---|---|",
-            f"| **Accessibility Quality Score** | **{m.accessibility_score:.1f} / 100** |",
-            f"| **Total Slides** | {context.total_slides} |",
-            f"| **Slides Analyzed** | {context.slides_analyzed} |",
-            f"| **Total Accessibility Issues** | {m.total_issues} |",
-            f"| - Critical | {m.critical_issues} |",
-            f"| - Error | {m.error_issues} |",
-            f"| - Warning | {m.warning_issues} |",
-            f"| - Info | {m.info_issues} |",
-            f"| **Rules Evaluated** | {m.total_rules_evaluated} |",
-            f"| - Rules Passed | {m.passed_rules} |",
-            f"| - Rules Failed | {m.failed_rules} |",
-            f"| - Rules Warning | {m.warning_rules} |",
-            f"| **Design Preservation Verified** | {'✅ Yes' if (c and c.integrity_preserved) else '⚠️ Not Verified'} |",
+            f"| Metric | Baseline (Pre-Remediation) | Candidate (Post-Remediation) |",
+            f"|---|---|---|",
+            f"| **Authoritative Quality Score (Multi-Signal V2)** | **{pre_q2_str}** | **{post_q2_str}** |",
+            f"| **Raw Severity Accessibility Score (V1)** | {pre_raw_str} | {post_raw_str} |",
+            f"| **Total Slides** | {context.total_slides} | {context.total_slides} |",
+            f"| **Slides Analyzed** | {context.slides_analyzed} | {context.slides_analyzed} |",
+            f"| **Total Unique Issues** | {total_unique_pre} | {total_unique_post} |",
+            f"| **Remediated & Verified Issues** | - | **{remediated_str}** |",
+            f"| **Preserved / Manual Review Issues** | - | {total_post_issues_str} |",
+            f"| **Raw Rule Check Violations** | {raw_pre_count} | {raw_post_count} |",
+            f"| - Remediated Raw Rule Checks | - | **{raw_remediated_count}** |",
+            f"| - Critical | {m.critical_issues} | {post_m.critical_issues if post_m else '-'} |",
+            f"| - Error | {m.error_issues} | {post_m.error_issues if post_m else '-'} |",
+            f"| - Warning | {m.warning_issues} | {post_m.warning_issues if post_m else '-'} |",
+            f"| - Info | {m.info_issues} | {post_m.info_issues if post_m else '-'} |",
+            f"| **Rules Evaluated** | {m.total_rules_evaluated} | {post_m.total_rules_evaluated if post_m else m.total_rules_evaluated} |",
+            f"| - Rules Passed | {m.passed_rules} | {post_m.passed_rules if post_m else m.passed_rules} |",
+            f"| - Rules Failed | {m.failed_rules} | {post_m.failed_rules if post_m else m.failed_rules} |",
+            f"| - Rules Warning | {m.warning_rules} | {post_m.warning_rules if post_m else m.warning_rules} |",
+            f"| **Design Preservation Verified** | {'✅ Yes' if (c and c.integrity_preserved) else '⚠️ Not Verified'} | {'✅ Yes' if (c and c.integrity_preserved) else '⚠️ Not Verified'} |",
+            f"",
+            f"> **Scoring Methodology & Metric Transparency:**",
+            f"> - **Authoritative Unique Issues vs Raw Checks:** SlideGuard distinguishes between *Authoritative Unique Issues* (correlated structural issues mapped to distinct slide/shape targets) and *Raw Rule Check Violations* (individual rule check instances). For example, multiple rules targeting the same slide reading order (`SG-RO-01` and `SG-RO-VAL-01`) or title placeholder (`SG-TTL-01` and `SG-PH-01`) represent 1 unique issue each, not separate issues.",
+            f"> - **Authoritative Quality Score (Multi-Signal V2):** Multi-signal weighted metric incorporating rule criticality, WCAG conformance levels, unified issue clustering, and visual signal confidence. Score ranges from 0 to 100.",
+            f"> - **Raw Severity Score (V1):** Deterministic penalty formula: `100 - (Critical×15 + Error×8 + Warning×2 + Info×0.5) / Total Slides`.",
+            f"> - **Verification Guarantee:** Remediated status is certified only after re-analyzing the candidate presentation OOXML. Items requiring human aesthetic judgment (e.g. brand palette contrast, layout reflow, missing alt-text authoring) are preserved as `MANUAL_REVIEW` without forced alterations.",
             f"",
             f"---",
             f"",
@@ -69,12 +106,39 @@ class ReportGenerator:
             if res.rule_id == "SG-RO-01":
                 ro_issues.extend(res.issues)
 
+        detailed_acts = getattr(context, "detailed_remediation_actions", None) or context.remediation_actions
+        ro_actions_by_slide = {
+            a.slide_number: a for a in detailed_acts
+            if getattr(a, "rule_id", "") == "SG-RO-01"
+        }
+
         if not ro_issues:
             md_lines.append("All slide reading sequences are logically compliant; no reordering required.\n")
         else:
+            if ro_actions_by_slide:
+                applied_ro = sum(1 for a in ro_actions_by_slide.values() if getattr(a.status, "value", str(a.status)) == "APPLIED")
+                no_changes_ro = sum(1 for a in ro_actions_by_slide.values() if getattr(a.status, "value", str(a.status)) == "NO_CHANGES")
+                skipped_ro = sum(1 for a in ro_actions_by_slide.values() if getattr(a.status, "value", str(a.status)) == "SKIPPED")
+                failed_ro = sum(1 for a in ro_actions_by_slide.values() if getattr(a.status, "value", str(a.status)) == "FAILED")
+                verified_ro = sum(1 for i in ro_issues if getattr(i, "verification_status", "") == "VERIFIED")
+
+                md_lines.extend([
+                    f"### Reading Order Remediation Summary",
+                    f"",
+                    f"| Reading Order Metric | Count |",
+                    f"|---|---|",
+                    f"| **Total Flagged Slides** | {len(ro_issues)} |",
+                    f"| **Applied in Candidate XML** | {applied_ro} |",
+                    f"| **No Changes Required** | {no_changes_ro} |",
+                    f"| **Skipped** | {skipped_ro} |",
+                    f"| **Failed** | {failed_ro} |",
+                    f"| **Verified in Candidate Copy** | {verified_ro} |",
+                    f"",
+                ])
+
             md_lines.extend([
-                f"| Slide # | Confidence | Original Order | Proposed Order | Footers Excluded | Reasoning |",
-                f"|---|---|---|---|---|---|",
+                f"| Slide # | Confidence | Original Order | Proposed Order | Footers Excluded | Remediation Status | Verification | Reasoning |",
+                f"|---|---|---|---|---|---|---|---|",
             ])
             for issue in ro_issues:
                 extra = issue.extra_data or {}
@@ -84,11 +148,31 @@ class ReportGenerator:
                 footers = extra.get("excluded_footer_objects", [])
                 reasons = extra.get("reasoning", [])
 
+                act = ro_actions_by_slide.get(issue.slide_number)
+                if act:
+                    act_stat = getattr(act.status, "value", str(act.status))
+                elif getattr(issue, "status", None) and (getattr(issue.status, "value", str(issue.status)) == "REMEDIATED"):
+                    act_stat = "APPLIED"
+                else:
+                    act_stat = "DETECTED"
+
+                verif = getattr(issue, "verification_status", "PENDING") or "PENDING"
+                if verif == "VERIFIED" or (act and getattr(act.status, "value", str(act.status)) == "APPLIED" and verif != "FAILED"):
+                    verif_display = "✅ Verified in Candidate XML"
+                elif verif == "FAILED":
+                    verif_display = "❌ Verification Failed"
+                elif act_stat == "NO_CHANGES":
+                    verif_display = "✅ Optimal Sequence"
+                elif act_stat == "SKIPPED":
+                    verif_display = "⚠️ Skipped"
+                else:
+                    verif_display = "⏳ Pending Verification"
+
                 f_desc = ", ".join(f"Shape {f['shape_id']} ({f.get('text', '')[:15]})" for f in footers) if footers else "None"
                 r_desc = "; ".join(reasons[:2]) if reasons else issue.description
 
                 md_lines.append(
-                    f"| {issue.slide_number} | **{conf}** | `{orig}` | `{prop}` | {f_desc} | {r_desc} |"
+                    f"| {issue.slide_number} | **{conf}** | `{orig}` | `{prop}` | {f_desc} | `{act_stat}` | {verif_display} | {r_desc} |"
                 )
             md_lines.append("")
 
@@ -261,6 +345,8 @@ class ReportGenerator:
         info_count = m.info_issues
 
         all_issues = [issue for res in context.rule_results for issue in res.issues]
+        remediated_count = sum(1 for i in all_issues if getattr(i, "status", None) and (getattr(i.status, "value", str(i.status)) == "REMEDIATED"))
+        verified_count = sum(1 for i in all_issues if getattr(i, "verification_status", "") == "VERIFIED")
         safe_auto_count = sum(1 for i in all_issues if i.behavior.value == "SAFE_AUTO_REMEDIATE" and getattr(i, "status", None) and (i.status.value == "SAFE_TO_REMEDIATE" or i.status == "SAFE_TO_REMEDIATE"))
         manual_review_count = sum(1 for i in all_issues if getattr(i, "status", None) and (getattr(i.status, "value", str(i.status)) == "MANUAL_REVIEW"))
         detect_only_count = sum(1 for i in all_issues if i.behavior.value == "DETECT_ONLY")
@@ -275,6 +361,8 @@ class ReportGenerator:
             f"| **Errors** | {err_count} |",
             f"| **Warnings** | {warn_count} |",
             f"| **Info** | {info_count} |",
+            f"| **Remediated Issues** | {remediated_count} |",
+            f"| **Verified in Candidate** | {verified_count} |",
             f"| **Safe Auto-Remediations** | {safe_auto_count} |",
             f"| **Manual-Review Items** | {manual_review_count} |",
             f"| **Detect-Only Issues** | {detect_only_count} |",
@@ -319,10 +407,11 @@ class ReportGenerator:
         safe_candidates = sum(1 for u in u_issues if getattr(u.remediation_eligibility, "value", str(u.remediation_eligibility)) == "ELIGIBLE_AUTO")
 
         remediated_cnt = intel_summary.get("remediated_count", m.remediated_issues)
-        unresolved_cnt = intel_summary.get("unchanged_count", 0) + intel_summary.get("changed_count", 0) + intel_summary.get("manual_review_count", 0) if intel_summary else m.unresolved_issues
+        unresolved_cnt = intel_summary.get("total_post", m.unresolved_issues) if intel_summary else m.unresolved_issues
         new_cnt = intel_summary.get("new_count", 0)
         manual_rev_cnt = intel_summary.get("manual_review_count", m.manual_review_issues)
         unsupported_cnt = intel_summary.get("unsupported_count", m.unsupported_issues)
+        raw_remediated_cnt = intel_summary.get("raw_issues_remediated", m.raw_remediated_issues)
 
         score_before = f"{context.pre_remediation_score:.1f} / 100" if context.pre_remediation_score is not None else f"{m.quality_score_v2:.1f} / 100"
         stage_val = getattr(context.stage, "value", str(context.stage))
@@ -332,6 +421,14 @@ class ReportGenerator:
             score_after = f"{m.quality_score_v2:.1f} / 100"
         else:
             score_after = "Pending Remediation"
+
+        raw_score_before = f"{context.pre_accessibility_score:.1f} / 100" if getattr(context, "pre_accessibility_score", None) is not None else f"{m.accessibility_score:.1f} / 100"
+        if getattr(context, "post_accessibility_score", None) is not None:
+            raw_score_after = f"{context.post_accessibility_score:.1f} / 100"
+        elif stage_val == "COMPLETED" or context.remediation_actions:
+            raw_score_after = f"{m.accessibility_score:.1f} / 100"
+        else:
+            raw_score_after = "Pending Remediation"
 
         md_lines.extend([
             f"| Intelligence Metric | Value |",
@@ -348,8 +445,11 @@ class ReportGenerator:
             f"| **New Issues** | {new_cnt} |",
             f"| **Manual-Review Issues** | {manual_rev_cnt} |",
             f"| **Unsupported Issues** | {unsupported_cnt} |",
-            f"| **Quality Score (Before Remediation)** | {score_before} |",
-            f"| **Quality Score (After Remediation)** | {score_after} |",
+            f"| **Raw Rule Checks Remediated** | {raw_remediated_cnt} |",
+            f"| **Authoritative Quality Score (Before)** | {score_before} |",
+            f"| **Authoritative Quality Score (After)** | {score_after} |",
+            f"| **Raw Severity Accessibility Score (Before)** | {raw_score_before} |",
+            f"| **Raw Severity Accessibility Score (After)** | {raw_score_after} |",
             f"",
         ])
 
@@ -558,6 +658,9 @@ class ReportGenerator:
             "intelligence_summary": context.intelligence_summary,
             "pre_remediation_score": context.pre_remediation_score,
             "post_remediation_score": context.post_remediation_score,
+            "pre_accessibility_score": getattr(context, "pre_accessibility_score", None),
+            "post_accessibility_score": getattr(context, "post_accessibility_score", None),
+            "post_metrics": context.post_metrics.to_dict() if getattr(context, "post_metrics", None) else None,
             "ai_authoring_summary": getattr(context, "ai_authoring_summary", {}),
             "ai_recommendations": [r.to_dict() if hasattr(r, "to_dict") else r for r in getattr(context, "ai_recommendations", [])],
             "ai_audit_trail": getattr(context, "ai_audit_trail", []),

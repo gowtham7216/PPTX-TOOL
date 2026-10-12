@@ -29,17 +29,21 @@ def test_real_fixture_ch06_instructor():
     orig_hash = calculate_sha256(fixture_path)
     qa_service = QAService()
 
-    res = qa_service.run_comprehensive_qa(fixture_path, profile_name="REAL_CH06_INSTRUCTOR")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cand_out = Path(tmp_dir) / f"candidate_{fixture_path.stem}.pptx"
+        res = qa_service.run_comprehensive_qa(
+            fixture_path, profile_name="REAL_CH06_INSTRUCTOR", output_file=cand_out
+        )
 
-    assert res.original_protection_status.value == "PASS"
-    assert calculate_sha256(fixture_path) == orig_hash
-    assert res.integrity_status.value == "PASS"
-    assert res.animation_preservation_status.value == "PASS"
-    assert res.overall_status.value in ["PASS", "PASS_WITH_WARNINGS"]
+        assert res.original_protection_status.value == "PASS"
+        assert calculate_sha256(fixture_path) == orig_hash
+        assert res.integrity_status.value == "PASS"
+        assert res.animation_preservation_status.value == "PASS"
+        assert res.overall_status.value in ["PASS", "PASS_WITH_WARNINGS"]
 
-    # Verify output presentation reloads
-    cand = Presentation(res.output_file)
-    assert len(cand.slides) == 50
+        # Verify output presentation reloads
+        cand = Presentation(res.output_file)
+        assert len(cand.slides) == 50
 
 
 def test_real_fixture_trig_functions():
@@ -50,15 +54,19 @@ def test_real_fixture_trig_functions():
     orig_hash = calculate_sha256(fixture_path)
     qa_service = QAService()
 
-    res = qa_service.run_comprehensive_qa(fixture_path, profile_name="REAL_TRIG_FUNCTIONS")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cand_out = Path(tmp_dir) / f"candidate_{fixture_path.stem}.pptx"
+        res = qa_service.run_comprehensive_qa(
+            fixture_path, profile_name="REAL_TRIG_FUNCTIONS", output_file=cand_out
+        )
 
-    assert res.original_protection_status.value == "PASS"
-    assert calculate_sha256(fixture_path) == orig_hash
-    assert res.integrity_status.value in ["PASS", "PASS_WITH_WARNINGS"]
-    assert res.overall_status.value in ["PASS", "PASS_WITH_WARNINGS"]
+        assert res.original_protection_status.value == "PASS"
+        assert calculate_sha256(fixture_path) == orig_hash
+        assert res.integrity_status.value in ["PASS", "PASS_WITH_WARNINGS"]
+        assert res.overall_status.value in ["PASS", "PASS_WITH_WARNINGS"]
 
-    cand = Presentation(res.output_file)
-    assert len(cand.slides) == 19
+        cand = Presentation(res.output_file)
+        assert len(cand.slides) == 19
 
 
 def test_profile_image_heavy():

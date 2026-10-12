@@ -37,6 +37,7 @@ class QualityMetrics:
     remediated_issues: int = 0
     unresolved_issues: int = 0
     unsupported_issues: int = 0
+    raw_remediated_issues: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -59,6 +60,7 @@ class QualityMetrics:
             "remediated_issues": self.remediated_issues,
             "unresolved_issues": self.unresolved_issues,
             "unsupported_issues": self.unsupported_issues,
+            "raw_remediated_issues": self.raw_remediated_issues,
         }
 
 
@@ -82,6 +84,7 @@ class JobContext:
     slides_with_errors: int = 0
     rule_results: List[RuleResult] = field(default_factory=list)
     remediation_actions: List[RemediationAction] = field(default_factory=list)
+    detailed_remediation_actions: List[RemediationAction] = field(default_factory=list)
     verification_result: Optional[VerificationResult] = None
     comparison_result: Optional[ComparisonResult] = None
     metrics: QualityMetrics = field(default_factory=QualityMetrics)
@@ -94,6 +97,10 @@ class JobContext:
     intelligence_summary: Dict[str, Any] = field(default_factory=dict)
     pre_remediation_score: Optional[float] = None
     post_remediation_score: Optional[float] = None
+    pre_accessibility_score: Optional[float] = None
+    post_accessibility_score: Optional[float] = None
+    post_rule_results: List[RuleResult] = field(default_factory=list)
+    post_metrics: Optional[QualityMetrics] = None
     # Phase 9 AI-Assisted Authoring fields
     ai_recommendations: List[Any] = field(default_factory=list)
     ai_audit_trail: List[Dict[str, Any]] = field(default_factory=list)

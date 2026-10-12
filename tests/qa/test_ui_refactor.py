@@ -35,19 +35,20 @@ def tk_app():
         pass
 
 
-def test_four_section_layout(tk_app):
-    """Verify that the notebook has exactly 4 clean top-level tabs."""
+def test_five_section_layout(tk_app):
+    """Verify that the notebook has exactly 5 clean top-level tabs: Dashboard, Slides, Reading Order, Remediation, Report."""
     app, root, _ = tk_app
 
     tabs = app.notebook.tabs()
-    assert len(tabs) == 4, f"Expected 4 main tabs, found {len(tabs)}"
+    assert len(tabs) == 5, f"Expected 5 main tabs, found {len(tabs)}"
 
     tab_titles = [app.notebook.tab(t, "text").strip() for t in tabs]
     expected_tabs = [
-        "Overview",
-        "Issues & Review",
+        "Dashboard",
+        "Slides",
+        "Reading Order",
         "Remediation",
-        "Reports & Validation"
+        "Report"
     ]
     assert tab_titles == expected_tabs
 
@@ -66,10 +67,9 @@ def test_issues_and_review_subtabs_exclusion(tk_app):
 
     # Verify expected review subtabs
     assert any("Detected Issues" in t for t in subtab_titles)
-    assert any("Reading Order" in t for t in subtab_titles)
-    assert any("Placeholder" in t for t in subtab_titles)
     assert any("Alternative Text" in t or "Alt Text" in t for t in subtab_titles)
     assert any("Intelligence" in t for t in subtab_titles)
+    assert any("Placeholder" in t for t in subtab_titles)
 
     # Selective Ungrouping and List Semantics must NOT appear as visible subtabs
     for t in subtab_titles:

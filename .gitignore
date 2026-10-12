@@ -42,7 +42,7 @@ coverage.xml
 
 # SlideGuard Workspace runtime directories
 workspace/job_*/
-workspace_runs/job_*/
+workspace_runs/
 temp/
 output/
 scratch/

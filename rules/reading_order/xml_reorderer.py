@@ -53,17 +53,18 @@ class XMLReadingOrderReorderer:
             logger.info("Current XML order already matches proposed order; no mutation required.")
             return True, "Order already matches proposed sequence.", orig_ids
 
-        # Verify that proposed_order contains all existing shape IDs
-        missing_ids = set(orig_ids) - set(proposed_order)
-        if missing_ids:
-            return False, f"Proposed order is missing existing shape IDs: {missing_ids}", orig_ids
+        # Safely preserve any unlisted shape IDs to ensure zero dropped shapes
+        unlisted_ids = [s_id for s_id in orig_ids if s_id not in proposed_order]
+        if unlisted_ids:
+            logger.info("Preserving unlisted shapes %s at original relative sequence.", unlisted_ids)
+        full_proposed_order = [s_id for s_id in proposed_order if s_id in shape_elements] + unlisted_ids
 
         # 2. Reorder in-place
         # In DrawingML, the first non-shape properties in <p:spTree> (p:nvGrpSpPr, p:grpSpPr)
         # must remain at the top of <p:spTree>.
-        # We move each shape in proposed_order to the end of sp_tree.
+        # We move each shape in full_proposed_order to the end of sp_tree.
         try:
-            for s_id in proposed_order:
+            for s_id in full_proposed_order:
                 if s_id in shape_elements:
                     elem = shape_elements[s_id]
                     # In lxml, appending an existing child node moves it to the end
@@ -78,8 +79,8 @@ class XMLReadingOrderReorderer:
                     if cnv_prs:
                         resulting_order.append(int(cnv_prs[0].get("id", "0")))
 
-            if resulting_order != proposed_order:
-                return False, f"Reordering mismatch: expected {proposed_order}, got {resulting_order}", resulting_order
+            if resulting_order != full_proposed_order:
+                return False, f"Reordering mismatch: expected {full_proposed_order}, got {resulting_order}", resulting_order
 
             logger.info("Successfully reordered <p:spTree> nodes in-place to: %s", resulting_order)
             return True, "Successfully reordered shape tree nodes in-place.", resulting_order

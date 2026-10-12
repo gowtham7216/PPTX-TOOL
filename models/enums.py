@@ -46,6 +46,7 @@ class RemediationStatus(str, Enum):
     """Status of an attempted remediation action."""
     NOT_STARTED = "NOT_STARTED"
     APPLIED = "APPLIED"
+    NO_CHANGES = "NO_CHANGES"
     SKIPPED = "SKIPPED"
     FAILED = "FAILED"
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"

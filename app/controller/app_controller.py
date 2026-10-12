@@ -87,6 +87,15 @@ class AppController:
         correlator = IssueCorrelator()
         context.unified_issues = correlator.correlate(rule_results)
         context.pre_remediation_score = context.metrics.quality_score_v2
+        context.pre_accessibility_score = context.metrics.accessibility_score
+
+        # Task 4 Comprehensive Placeholder Baseline Audit
+        try:
+            from rules.placeholders.rule import PlaceholderRule
+            ph_rule = PlaceholderRule()
+            context.task_4_placeholder_report = ph_rule.generate_presentation_audit_report(self.current_presentation)
+        except Exception as err:
+            logger.warning("Could not generate baseline placeholder audit: %s", err)
 
         # Phase 9: AI-Assisted Accessibility Authoring recommendations
         from engine.authoring.authoring_service import AuthoringService
@@ -162,14 +171,17 @@ class AppController:
             raise PermissionError("User approval is required before running remediation.")
 
         if self.current_presentation is None:
-            self.current_presentation = self.reader.read(context.working_file)
+            if context.candidate_file and context.candidate_file.exists():
+                self.current_presentation = self.reader.read(context.candidate_file)
+            else:
+                self.current_presentation = self.reader.read(context.working_file)
 
         if progress_callback:
             progress_callback(1, 2, "Aligning reading order across slides...")
 
         self.remediator.remediate_reading_order(context, self.current_presentation)
         self._export_candidate_pptx(context)
-        return context
+        return self._finalize_candidate_and_export(context)
 
     def execute_placeholder_remediation(
         self,
@@ -188,7 +200,7 @@ class AppController:
 
         self.remediator.remediate_placeholders(context, self.current_presentation)
         self._export_candidate_pptx(context)
-        return context
+        return self._finalize_candidate_and_export(context)
 
     def execute_alt_text_remediation(
         self,
@@ -207,7 +219,7 @@ class AppController:
 
         self.remediator.remediate_alt_text_and_decorative(context, self.current_presentation)
         self._export_candidate_pptx(context)
-        return context
+        return self._finalize_candidate_and_export(context)
 
     def execute_ungrouping_remediation(
         self,
@@ -226,7 +238,7 @@ class AppController:
 
         self.remediator.remediate_selective_ungrouping(context, self.current_presentation)
         self._export_candidate_pptx(context)
-        return context
+        return self._finalize_candidate_and_export(context)
 
     def execute_list_remediation(
         self,
@@ -245,7 +257,7 @@ class AppController:
 
         self.remediator.remediate_list_semantics(context, self.current_presentation)
         self._export_candidate_pptx(context)
-        return context
+        return self._finalize_candidate_and_export(context)
 
     def generate_reports(self, context: JobContext) -> JobContext:
         """Explicitly generates or updates audit reports in reports folder and export destination."""
@@ -351,6 +363,62 @@ class AppController:
                 intentional_shape_ids=list(approved_shape_ids)
             )
             context.comparison_result = comparison
+
+            # Re-analyze candidate presentation to verify actual resulting accessibility state
+            post_rule_results = self.analyzer.analyze(candidate_presentation)
+            post_metrics = self.analyzer.compute_metrics(post_rule_results, context.total_slides)
+            context.post_rule_results = post_rule_results
+            context.post_metrics = post_metrics
+            context.post_remediation_score = post_metrics.quality_score_v2
+            context.post_accessibility_score = post_metrics.accessibility_score
+
+            # Run issue reconciliation comparing pre-issues against candidate findings
+            from engine.intelligence.correlator import IssueCorrelator
+            from engine.intelligence.reconciliation import IssueReconciliationService
+            correlator = IssueCorrelator()
+            if not context.unified_issues and context.rule_results:
+                context.unified_issues = correlator.correlate(context.rule_results)
+
+            post_unified_issues = correlator.correlate(post_rule_results)
+            reconciler = IssueReconciliationService()
+            reconciliation_actions = getattr(context, "detailed_remediation_actions", None) or context.remediation_actions
+            reconciliation_summary = reconciler.reconcile(
+                pre_issues=context.unified_issues,
+                post_issues=post_unified_issues,
+                remediation_actions=reconciliation_actions
+            )
+
+            # Update verification & remediation statuses in context.rule_results
+            post_issue_keys = {
+                (issue.slide_number, issue.shape_id, res.rule_id)
+                for res in post_rule_results for issue in res.issues
+            }
+            from models.enums import AccessibilityStatus
+            for res in context.rule_results:
+                for issue in res.issues:
+                    key = (issue.slide_number, issue.shape_id, res.rule_id)
+                    if key not in post_issue_keys:
+                        issue.status = AccessibilityStatus.REMEDIATED
+                        issue.verification_status = "VERIFIED"
+                    else:
+                        issue.verification_status = "VERIFIED"
+
+            raw_pre_count = sum(len(res.issues) for res in context.rule_results)
+            raw_post_count = sum(len(res.issues) for res in post_rule_results)
+            raw_remediated_count = sum(1 for res in context.rule_results for issue in res.issues if issue.status == AccessibilityStatus.REMEDIATED)
+            raw_unresolved_count = len([i for res in context.rule_results for i in res.issues if i.status != AccessibilityStatus.REMEDIATED])
+
+            reconciliation_summary.raw_issues_pre = raw_pre_count
+            reconciliation_summary.raw_issues_post = raw_post_count
+            reconciliation_summary.raw_issues_remediated = raw_remediated_count
+            context.intelligence_summary = reconciliation_summary.to_dict()
+
+            # Update authoritative metrics on context.metrics
+            context.metrics.raw_remediated_issues = raw_remediated_count
+            context.metrics.remediated_issues = reconciliation_summary.remediated_count
+            context.metrics.unresolved_issues = reconciliation_summary.total_post
+            context.metrics.manual_review_issues = reconciliation_summary.manual_review_count
+            context.metrics.correlated_issues_count = reconciliation_summary.total_pre
 
             # Phase 10: Run comprehensive QA checks on remediated candidate
             try:

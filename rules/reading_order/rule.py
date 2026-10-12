@@ -133,6 +133,7 @@ class ReadingOrderRule(BaseAccessibilityRule):
         action_id = f"rem_{issue.issue_id}"
         extra = issue.extra_data or {}
         proposed_order = extra.get("proposed_order", [])
+        original_order = extra.get("original_order", [])
         confidence = extra.get("confidence", "MEDIUM")
 
         if not proposed_order:
@@ -157,6 +158,20 @@ class ReadingOrderRule(BaseAccessibilityRule):
                 status=RemediationStatus.SKIPPED,
                 confidence=0.3,
                 error_message="Low confidence layout; automatic reordering withheld."
+            )
+
+        if original_order and proposed_order == original_order:
+            logger.info("Slide %d: proposed order matches original order; no mutation needed.", slide.slide_number)
+            return RemediationAction(
+                action_id=action_id,
+                rule_id=self.rule_id,
+                slide_number=slide.slide_number,
+                description="Slide reading order already matches proposed sequence. No changes required.",
+                status=RemediationStatus.NO_CHANGES,
+                original_state={"order": original_order},
+                remediated_state={"order": original_order},
+                confidence=1.0,
+                is_user_approved=True
             )
 
         if slide.raw_slide is None or not hasattr(slide.raw_slide, "_element"):
@@ -189,7 +204,7 @@ class ReadingOrderRule(BaseAccessibilityRule):
             )
 
         # Animation safety verification: verify all valid animation targets are preserved
-        orig_ids_set = set(extra.get("original_order", []))
+        orig_ids_set = set(original_order) if original_order else set(resulting_order)
         anim_targets_preserved = self._verify_animation_targets(slide_elem, orig_ids_set)
         if not anim_targets_preserved:
             return RemediationAction(
@@ -202,13 +217,26 @@ class ReadingOrderRule(BaseAccessibilityRule):
                 error_message="Animation target shape ID was invalidated."
             )
 
+        if original_order and resulting_order == original_order:
+            return RemediationAction(
+                action_id=action_id,
+                rule_id=self.rule_id,
+                slide_number=slide.slide_number,
+                description=f"Existing XML order already matches proposed sequence {resulting_order}. No changes required.",
+                status=RemediationStatus.NO_CHANGES,
+                original_state={"order": original_order},
+                remediated_state={"order": resulting_order},
+                confidence=1.0,
+                is_user_approved=True
+            )
+
         return RemediationAction(
             action_id=action_id,
             rule_id=self.rule_id,
             slide_number=slide.slide_number,
             description=f"Reordered shapes in-place to sequence {resulting_order}.",
             status=RemediationStatus.APPLIED,
-            original_state={"order": extra.get("original_order", [])},
+            original_state={"order": original_order},
             remediated_state={"order": resulting_order},
             confidence=0.95 if confidence == "HIGH" else 0.80,
             is_user_approved=True

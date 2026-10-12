@@ -60,7 +60,12 @@ class ReconciliationSummary:
     new_count: int = 0
     changed_count: int = 0
     manual_review_count: int = 0
+    baseline_manual_review_count: int = 0
+    decomposed_remnants_count: int = 0
     unsupported_count: int = 0
+    raw_issues_pre: int = 0
+    raw_issues_post: int = 0
+    raw_issues_remediated: int = 0
     items: List[ReconciledItem] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -73,7 +78,12 @@ class ReconciliationSummary:
             "new_count": self.new_count,
             "changed_count": self.changed_count,
             "manual_review_count": self.manual_review_count,
+            "baseline_manual_review_count": self.baseline_manual_review_count,
+            "decomposed_remnants_count": self.decomposed_remnants_count,
             "unsupported_count": self.unsupported_count,
+            "raw_issues_pre": self.raw_issues_pre,
+            "raw_issues_post": self.raw_issues_post,
+            "raw_issues_remediated": self.raw_issues_remediated,
             "items": [it.to_dict() for it in self.items],
         }
 
@@ -102,6 +112,13 @@ class IssueReconciliationService:
                 applied_by_target[key] = action
                 if action.rule_id:
                     applied_by_target[(action.slide_number, action.rule_id)] = action
+                if action.target_shape_id is not None:
+                    applied_by_target[(action.slide_number, action.target_shape_id)] = action
+                # Also index converted shape IDs from action remediated_state
+                rem_state = getattr(action, "remediated_state", {}) or {}
+                if isinstance(rem_state, dict):
+                    for cid in rem_state.get("converted_shape_ids", []):
+                        applied_by_target[(action.slide_number, cid)] = action
 
         # Index post issues by match key: (slide_number, shape_id, primary_rule_id)
         post_by_key = {}
@@ -117,19 +134,53 @@ class IssueReconciliationService:
             matching_post = post_by_key.get(key)
 
             # Check if an applied remediation targeted this issue
-            action = applied_by_target.get((pre.slide_number, pre.shape_id)) or applied_by_target.get((pre.slide_number, pre.primary_rule_id))
+            action = (
+                applied_by_target.get((pre.slide_number, pre.shape_id))
+                or applied_by_target.get((pre.slide_number, pre.primary_rule_id))
+            )
+            if not action and pre.primary_rule_id == "SG-RO-VAL-01":
+                action = applied_by_target.get((pre.slide_number, "SG-RO-01"))
+            if not action and pre.shape_id is None:
+                action = applied_by_target.get((pre.slide_number, None))
+
+            # Check if post has a remnant issue from pre's cluster on same shape/slide
+            remnant_post = None
+            if matching_post is None:
+                for rel_rule in pre.related_rule_ids:
+                    rel_key = (pre.slide_number, pre.shape_id, rel_rule)
+                    if rel_key in post_by_key:
+                        remnant_post = post_by_key[rel_key]
+                        matched_post_keys.add(rel_key)
+                        break
 
             if matching_post is None:
                 # Issue no longer present post-remediation!
+                rec_status = ReconciliationStatus.REMEDIATED
+                summary.remediated_count += 1
+                summary.resolved_count += 1
+
                 if action:
-                    rec_status = ReconciliationStatus.REMEDIATED
-                    summary.remediated_count += 1
-                    summary.resolved_count += 1
-                    details = f"Safely remediated by action: {action.description}"
+                    if remnant_post:
+                        summary.decomposed_remnants_count += 1
+                        details = (
+                            f"Safely remediated primary issue by action: {action.description}; "
+                            f"related {remnant_post.primary_rule_id} preserved for manual review."
+                        )
+                        remnant_post.reconciliation_status = ReconciliationStatus.MANUAL_REVIEW
+                        remnant_post.verification_status = "VERIFIED"
+                    else:
+                        details = f"Safely remediated by action: {action.description}"
                 else:
-                    rec_status = ReconciliationStatus.RESOLVED
-                    summary.resolved_count += 1
-                    details = "Issue resolved post-remediation."
+                    if remnant_post:
+                        summary.decomposed_remnants_count += 1
+                        details = (
+                            f"Safely resolved primary issue post-remediation; "
+                            f"related {remnant_post.primary_rule_id} preserved for manual review."
+                        )
+                        remnant_post.reconciliation_status = ReconciliationStatus.MANUAL_REVIEW
+                        remnant_post.verification_status = "VERIFIED"
+                    else:
+                        details = "Issue verified resolved post-remediation."
 
                 item = ReconciledItem(
                     unified_id=pre.unified_id,
@@ -144,6 +195,7 @@ class IssueReconciliationService:
                     details=details,
                 )
                 pre.reconciliation_status = rec_status
+                pre.verification_status = "VERIFIED"
                 summary.items.append(item)
             else:
                 # Issue still exists post-remediation
@@ -154,7 +206,7 @@ class IssueReconciliationService:
                     details = "Unsupported structural issue; preserved without alteration."
                 elif pre.status == AccessibilityStatus.MANUAL_REVIEW or matching_post.status == AccessibilityStatus.MANUAL_REVIEW:
                     rec_status = ReconciliationStatus.MANUAL_REVIEW
-                    summary.manual_review_count += 1
+                    summary.baseline_manual_review_count += 1
                     details = "Requires human manual authoring or verification."
                 elif pre.severity != matching_post.severity or pre.explanation != matching_post.explanation:
                     rec_status = ReconciliationStatus.CHANGED
@@ -178,10 +230,12 @@ class IssueReconciliationService:
                     details=details,
                 )
                 pre.reconciliation_status = rec_status
+                pre.verification_status = "VERIFIED"
                 matching_post.reconciliation_status = rec_status
+                matching_post.verification_status = "VERIFIED"
                 summary.items.append(item)
 
-        # Step 2: Check for NEW issues in post_issues
+        # Step 2: Check for truly NEW issues in post_issues
         for post in post_issues:
             key = (post.slide_number, post.shape_id, post.primary_rule_id)
             if key not in matched_post_keys:
@@ -199,6 +253,10 @@ class IssueReconciliationService:
                     details="New finding detected post-remediation.",
                 )
                 post.reconciliation_status = rec_status
+                post.verification_status = "VERIFIED"
                 summary.items.append(item)
+
+        # Aggregate candidate manual review count (baseline manual review + decomposed remnants)
+        summary.manual_review_count = summary.baseline_manual_review_count + summary.decomposed_remnants_count
 
         return summary

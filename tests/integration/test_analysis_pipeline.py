@@ -54,7 +54,7 @@ def test_full_pipeline_flow(sample_presentation_path, isolated_workspace):
     assert context.stage == JobStage.COMPLETED
     assert len(context.remediation_actions) == 6
     # Step 1 (Reading Order) was actively executed
-    assert context.remediation_actions[0].status in (RemediationStatus.APPLIED, RemediationStatus.SKIPPED)
+    assert context.remediation_actions[0].status in (RemediationStatus.APPLIED, RemediationStatus.SKIPPED, RemediationStatus.NO_CHANGES)
     # Step 2 (Selective Ungrouping) was actively executed (Phase 4)
     assert context.remediation_actions[1].status in (RemediationStatus.APPLIED, RemediationStatus.SKIPPED)
     # Step 3 (Placeholder Conversion) was actively executed (Phase 5)
