@@ -28,12 +28,13 @@ class ReportGenerator:
         c = context.comparison_result
         v = context.verification_result
 
+        stage_val = getattr(context.stage, "value", str(context.stage))
         md_lines = [
             f"# SlideGuard Accessibility & Integrity Report",
             f"",
             f"**Job ID:** `{context.job_id}`  ",
             f"**File Name:** `{context.original_file.name}`  ",
-            f"**Status:** `{context.stage.value}`  ",
+            f"**Status:** `{stage_val}`  ",
             f"**Execution Duration:** `{context.duration_seconds:.2f}s`  ",
             f"",
             f"---",
@@ -324,9 +325,10 @@ class ReportGenerator:
         unsupported_cnt = intel_summary.get("unsupported_count", m.unsupported_issues)
 
         score_before = f"{context.pre_remediation_score:.1f} / 100" if context.pre_remediation_score is not None else f"{m.quality_score_v2:.1f} / 100"
+        stage_val = getattr(context.stage, "value", str(context.stage))
         if context.post_remediation_score is not None:
             score_after = f"{context.post_remediation_score:.1f} / 100"
-        elif context.stage.value == "COMPLETED" or context.remediation_actions:
+        elif stage_val == "COMPLETED" or context.remediation_actions:
             score_after = f"{m.quality_score_v2:.1f} / 100"
         else:
             score_after = "Pending Remediation"
@@ -543,7 +545,7 @@ class ReportGenerator:
         return {
             "job_id": context.job_id,
             "original_file": str(context.original_file),
-            "stage": context.stage.value,
+            "stage": getattr(context.stage, "value", str(context.stage)),
             "duration_seconds": context.duration_seconds,
             "total_slides": context.total_slides,
             "slides_analyzed": context.slides_analyzed,

@@ -250,7 +250,18 @@ class AppController:
     def generate_reports(self, context: JobContext) -> JobContext:
         """Explicitly generates or updates audit reports in reports folder and export destination."""
         if context.reports_dir:
-            report_name = "final_report" if context.stage in (JobStage.REMEDIATED, JobStage.VERIFYING, JobStage.VERIFIED, JobStage.COMPLETED) else "analysis_report"
+            stage_val = getattr(context.stage, "value", str(context.stage))
+            final_stages = {
+                JobStage.REMEDIATED,
+                JobStage.VERIFYING,
+                JobStage.VERIFIED,
+                JobStage.COMPLETED,
+                "REMEDIATED",
+                "VERIFYING",
+                "VERIFIED",
+                "COMPLETED",
+            }
+            report_name = "final_report" if (context.stage in final_stages or stage_val in final_stages) else "analysis_report"
             self.reporter.generate_json_report(context, context.reports_dir / f"{report_name}.json")
             self.reporter.generate_markdown_report(context, context.reports_dir / f"{report_name}.md")
 

@@ -9,10 +9,13 @@ import os
 import sys
 import threading
 import datetime
+import logging
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 from PIL import Image, ImageDraw, ImageTk, ImageFont
 
@@ -2203,8 +2206,11 @@ class SlideGuardMainWindow:
                 self.job_context = self.controller.generate_reports(self.job_context)
                 self.root.after(0, self._on_generate_report_finished)
             except Exception as e:
+                logger.exception("Report generation failed: %s", e)
+                err_msg = str(e) or type(e).__name__
                 self.root.after(0, lambda: setattr(self, "is_busy", False))
-                self.root.after(0, lambda: messagebox.showerror("Report Error", f"Report generation failed: {e}"))
+                self.root.after(0, lambda: self.status_var.set(f"Report generation error: {err_msg}"))
+                self.root.after(0, lambda: messagebox.showerror("Report Error", f"Report generation failed: {err_msg}"))
                 self.root.after(0, lambda: self.generate_report_btn.config(state=tk.NORMAL))
 
         threading.Thread(target=_worker, daemon=True).start()
