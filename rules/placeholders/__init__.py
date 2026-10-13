@@ -17,6 +17,10 @@ from rules.placeholders.transformer import (
     PlaceholderTransformer,
     ConversionResult,
 )
+from rules.placeholders.placeholder_engine_v2 import (
+    PlaceholderEngineV2,
+    PlaceholderInsertionResult,
+)
 
 __all__ = [
     "PlaceholderRule",
@@ -29,4 +33,6 @@ __all__ = [
     "InheritedProperties",
     "PlaceholderTransformer",
     "ConversionResult",
+    "PlaceholderEngineV2",
+    "PlaceholderInsertionResult",
 ]

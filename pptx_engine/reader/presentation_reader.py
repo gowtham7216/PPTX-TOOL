@@ -4,7 +4,7 @@ Parses PowerPoint PPTX files into internal models with OOXML-level fidelity.
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import logging
 import re
 from pptx import Presentation
@@ -17,6 +17,7 @@ from models.presentation import PresentationModel, DocumentMetadata
 from engine.common.interfaces import IPresentationReader
 from pptx_engine.utilities.geometry import emu_to_points, is_in_footer_region
 from pptx_engine.ooxml.xml_utils import get_shape_alt_text, get_shape_decorative_status
+from pptx_engine.ooxml.xml_namespaces import NAMESPACES
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +94,14 @@ class PresentationReader(IPresentationReader):
 
         # Parse title if available
         try:
-            if slide.shapes.title and slide.shapes.title.has_text_frame:
-                slide_model.title = slide.shapes.title.text_frame.text.strip()
-                slide_model.title_shape_id = slide.shapes.title.shape_id
+            title_shape = slide.shapes.title
+            if title_shape is not None:
+                slide_model.title_shape_id = title_shape.shape_id
+                tx_body = None
+                if hasattr(title_shape, "_element") and title_shape._element is not None:
+                    tx_body = title_shape._element.find(f"{{{NAMESPACES['p']}}}txBody")
+                if (tx_body is not None or not hasattr(title_shape, "_element")) and title_shape.has_text_frame:
+                    slide_model.title = title_shape.text_frame.text.strip()
         except Exception:
             pass
 
@@ -198,32 +204,39 @@ class PresentationReader(IPresentationReader):
 
         # Extract text & paragraphs
         if shape.has_text_frame:
-            tf = shape.text_frame
-            full_text = []
-            for p in tf.paragraphs:
-                p_text = p.text or ""
-                full_text.append(p_text)
-                p_model = TextParagraphModel(text=p_text, level=p.level)
+            sp_elm = getattr(shape, "_element", None)
+            tx_body = None
+            if sp_elm is not None:
+                tx_body = sp_elm.find(f"{{{NAMESPACES['p']}}}txBody")
 
-                # Identify list type
-                p_model.list_type = self._detect_list_type(p)
+            # Avoid calling shape.text_frame on shapes that have no txBody in XML (which would insert an empty txBody)
+            if sp_elm is not None and tx_body is None:
+                shape_model.text_content = ""
+            else:
+                tf = shape.text_frame
+                full_text = []
+                for p in tf.paragraphs:
+                    p_text = p.text or ""
+                    full_text.append(p_text)
+                    p_lvl = self._get_paragraph_level(p)
+                    p_model = TextParagraphModel(text=p_text, level=p_lvl)
 
-                for r in p.runs:
-                    r_model = TextRunModel(text=r.text or "")
-                    if hasattr(r, "font") and r.font:
-                        r_model.font_name = r.font.name
-                        if r.font.size:
-                            r_model.font_size_pt = emu_to_points(r.font.size)
-                        r_model.font_bold = r.font.bold
-                        r_model.font_italic = r.font.italic
-                        try:
-                            if r.font.color and r.font.color.rgb:
-                                r_model.font_color_rgb = str(r.font.color.rgb)
-                        except Exception:
-                            pass
-                    p_model.runs.append(r_model)
-                shape_model.paragraphs.append(p_model)
-            shape_model.text_content = "\n".join(full_text)
+                    # Identify list type
+                    p_model.list_type = self._detect_list_type(p, level=p_lvl)
+
+                    for r in p.runs:
+                        font_name, font_size_pt, font_bold, font_italic, font_color_rgb = self._extract_run_formatting(r)
+                        r_model = TextRunModel(
+                            text=r.text or "",
+                            font_name=font_name,
+                            font_size_pt=font_size_pt,
+                            font_bold=font_bold,
+                            font_italic=font_italic,
+                            font_color_rgb=font_color_rgb,
+                        )
+                        p_model.runs.append(r_model)
+                    shape_model.paragraphs.append(p_model)
+                shape_model.text_content = "\n".join(full_text)
 
         # Extract table info
         if shape.has_table:
@@ -243,11 +256,13 @@ class PresentationReader(IPresentationReader):
 
         return shape_model
 
-    def _detect_list_type(self, paragraph) -> ListType:
+    def _detect_list_type(self, paragraph, level: Optional[int] = None) -> ListType:
         """Determines the list style of a paragraph from its formatting and content."""
+        if level is None:
+            level = self._get_paragraph_level(paragraph)
         text = (paragraph.text or "").strip()
         # Direct bullet check
-        if paragraph.level > 0:
+        if level > 0:
             # Sub-levels in standard body placeholders default to bullets unless numbered
             if text and text[0].isdigit() and len(text) > 2 and text[1] in [".", ")"]:
                 return ListType.NUMBERED_NUMERIC
@@ -265,3 +280,99 @@ class PresentationReader(IPresentationReader):
                     return ListType.NUMBERED_ALPHA_UPPER
 
         return ListType.NONE
+
+    @staticmethod
+    def _get_paragraph_level(paragraph) -> int:
+        """Safely extracts paragraph level without mutating XML by adding <a:pPr/>."""
+        p_elm = getattr(paragraph, "_p", None)
+        if p_elm is None:
+            p_elm = getattr(paragraph, "_element", None)
+        if p_elm is not None:
+            pPr = p_elm.find(f"{{{NAMESPACES['a']}}}pPr")
+            if pPr is not None:
+                lvl = pPr.get("lvl")
+                if lvl is not None:
+                    try:
+                        return int(lvl)
+                    except (ValueError, TypeError):
+                        return 0
+            return 0
+        try:
+            return getattr(paragraph, "level", 0) or 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _extract_run_formatting(run) -> Tuple[Optional[str], Optional[float], Optional[bool], Optional[bool], Optional[str]]:
+        """Safely extracts run character properties without mutating XML by adding <a:rPr/> or <a:solidFill/>.
+
+        Returns:
+            (font_name, font_size_pt, font_bold, font_italic, font_color_rgb)
+        """
+        r_elm = getattr(run, "_r", None)
+        if r_elm is None:
+            r_elm = getattr(run, "_element", None)
+
+        if r_elm is not None:
+            rPr = r_elm.find(f"{{{NAMESPACES['a']}}}rPr")
+            if rPr is None:
+                return None, None, None, None, None
+
+            font_name = None
+            latin = rPr.find(f"{{{NAMESPACES['a']}}}latin")
+            if latin is not None:
+                font_name = latin.get("typeface") or None
+
+            font_size_pt = None
+            sz = rPr.get("sz")
+            if sz is not None:
+                try:
+                    font_size_pt = float(sz) / 100.0
+                except (ValueError, TypeError):
+                    pass
+
+            font_bold = None
+            b = rPr.get("b")
+            if b is not None:
+                font_bold = b in ("1", "true", "True")
+
+            font_italic = None
+            i = rPr.get("i")
+            if i is not None:
+                font_italic = i in ("1", "true", "True")
+
+            font_color_rgb = None
+            solid_fill = rPr.find(f"{{{NAMESPACES['a']}}}solidFill")
+            if solid_fill is not None:
+                srgb_clr = solid_fill.find(f"{{{NAMESPACES['a']}}}srgbClr")
+                if srgb_clr is not None:
+                    val = srgb_clr.get("val")
+                    if val:
+                        font_color_rgb = val.upper()
+
+            return font_name, font_size_pt, font_bold, font_italic, font_color_rgb
+
+        # Fallback for mock objects without underlying XML
+        font_name = None
+        font_size_pt = None
+        font_bold = None
+        font_italic = None
+        font_color_rgb = None
+        if hasattr(run, "font") and run.font:
+            font_name = getattr(run.font, "name", None)
+            sz = getattr(run.font, "size", None)
+            if sz is not None:
+                try:
+                    font_size_pt = emu_to_points(sz)
+                except Exception:
+                    pass
+            font_bold = getattr(run.font, "bold", None)
+            font_italic = getattr(run.font, "italic", None)
+            try:
+                color = getattr(run.font, "color", None)
+                if color and hasattr(color, "rgb") and color.rgb:
+                    font_color_rgb = str(color.rgb)
+            except Exception:
+                pass
+
+        return font_name, font_size_pt, font_bold, font_italic, font_color_rgb

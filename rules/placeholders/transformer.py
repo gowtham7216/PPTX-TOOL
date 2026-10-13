@@ -26,6 +26,7 @@ from rules.placeholders.classifier import (
     _safe_xpath,
     NSMAP,
 )
+from rules.placeholders.placeholder_engine_v2 import PlaceholderEngineV2
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,13 @@ class PlaceholderTransformer:
     Strictly guarantees visual fidelity, shape ID stability, and fail-safe isolation.
     """
 
-    def __init__(self, classifier: Optional[PlaceholderClassifier] = None):
+    def __init__(
+        self,
+        classifier: Optional[PlaceholderClassifier] = None,
+        engine: Optional[PlaceholderEngineV2] = None,
+    ):
         self.classifier = classifier or PlaceholderClassifier()
+        self.engine = engine or PlaceholderEngineV2()
 
     def convert_slide(
         self,
@@ -207,7 +213,7 @@ class PlaceholderTransformer:
             analysis.category == PlaceholderCategory.STANDALONE_TITLE_BOX
             or (analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type in ("title", "ctrtitle"))
         ):
-            self._convert_to_title_placeholder(shape_elem)
+            self._convert_to_title_placeholder(shape_elem, sp_tree=sp_tree)
             return None
 
         # CASE C: Standalone subtitle text box -> Add native subtitle placeholder tag
@@ -215,7 +221,7 @@ class PlaceholderTransformer:
             analysis.category == PlaceholderCategory.STANDALONE_SUBTITLE_BOX
             or (analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type == "subTitle")
         ):
-            self._convert_to_subtitle_placeholder(shape_elem)
+            self._convert_to_subtitle_placeholder(shape_elem, sp_tree=sp_tree, idx=analysis.placeholder_idx)
             return None
 
         # CASE D: Standalone body text box -> Add native body placeholder tag
@@ -223,7 +229,37 @@ class PlaceholderTransformer:
             analysis.category == PlaceholderCategory.STANDALONE_BODY_BOX
             or (analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type == "body" and not analysis.has_ph)
         ):
-            self._convert_to_body_placeholder(shape_elem)
+            self._convert_to_body_placeholder(shape_elem, sp_tree=sp_tree, idx=analysis.placeholder_idx)
+            return None
+
+        # CASE D2: Standalone picture -> Add native pic placeholder tag
+        if (
+            analysis.category == PlaceholderCategory.PICTURE
+            or analysis.proposed_placeholder_type == "pic"
+        ) and not analysis.has_ph:
+            self.engine.ensure_placeholder(
+                shape_elem,
+                "pic",
+                sp_tree=sp_tree,
+                preferred_idx=analysis.placeholder_idx,
+                freeze_styles=False,
+                rename_content=False,
+            )
+            return None
+
+        # CASE D3: Standalone table -> Add native tbl placeholder tag
+        if (
+            analysis.category == PlaceholderCategory.TABLE
+            or analysis.proposed_placeholder_type == "tbl"
+        ) and not analysis.has_ph:
+            self.engine.ensure_placeholder(
+                shape_elem,
+                "tbl",
+                sp_tree=sp_tree,
+                preferred_idx=analysis.placeholder_idx,
+                freeze_styles=False,
+                rename_content=False,
+            )
             return None
 
         # CASE E: Safe Native Body / Object placeholder -> Materialize inherited geometry and detach ph
@@ -238,85 +274,52 @@ class PlaceholderTransformer:
         logger.info("No conversion needed for Shape %d (category: %s)", analysis.shape_id, analysis.category)
         return None
 
-    def _convert_to_title_placeholder(self, shape_elem) -> None:
+    def _convert_to_title_placeholder(self, shape_elem, sp_tree=None) -> None:
         """
         Converts standalone text box into native slide title placeholder.
-        Adds <p:ph type="title"/> into <p:nvSpPr><p:nvPr>.
         Preserves all geometry, font, color, text, and IDs.
         """
-        nv_prs = _safe_xpath(shape_elem, ".//p:nvSpPr/p:nvPr")
-        if not nv_prs:
-            nv_sp_prs = _safe_xpath(shape_elem, ".//p:nvSpPr")
-            if nv_sp_prs:
-                nv_pr = etree.SubElement(nv_sp_prs[0], "{http://schemas.openxmlformats.org/presentationml/2006/main}nvPr")
-            else:
-                return
-        else:
-            nv_pr = nv_prs[0]
+        self.engine.ensure_placeholder(
+            shape_elem,
+            "title",
+            sp_tree=sp_tree,
+            freeze_styles=False,
+            rename_content=False,
+        )
 
-        existing_ph = _safe_xpath(nv_pr, ".//p:ph")
-        if not existing_ph:
-            etree.SubElement(
-                nv_pr,
-                "{http://schemas.openxmlformats.org/presentationml/2006/main}ph",
-                attrib={"type": "title"}
-            )
-        else:
-            existing_ph[0].set("type", "title")
-
-    def _convert_to_subtitle_placeholder(self, shape_elem) -> None:
+    def _convert_to_subtitle_placeholder(self, shape_elem, sp_tree=None, idx: Optional[str] = None) -> None:
         """
         Converts standalone text box into native slide subtitle placeholder.
-        Adds <p:ph type="subTitle" idx="1"/> into <p:nvSpPr><p:nvPr>.
-        Preserves all geometry, font, color, text, and IDs.
+        Allocates non-colliding index and freezes spacing/bullet isolation.
         """
-        nv_prs = _safe_xpath(shape_elem, ".//p:nvSpPr/p:nvPr")
-        if not nv_prs:
-            nv_sp_prs = _safe_xpath(shape_elem, ".//p:nvSpPr")
-            if nv_sp_prs:
-                nv_pr = etree.SubElement(nv_sp_prs[0], "{http://schemas.openxmlformats.org/presentationml/2006/main}nvPr")
-            else:
-                return
-        else:
-            nv_pr = nv_prs[0]
+        if isinstance(sp_tree, str):
+            idx = sp_tree
+            sp_tree = None
+        self.engine.ensure_placeholder(
+            shape_elem,
+            "subTitle",
+            sp_tree=sp_tree,
+            preferred_idx=idx,
+            freeze_styles=True,
+            rename_content=False,
+        )
 
-        existing_ph = _safe_xpath(nv_pr, ".//p:ph")
-        if not existing_ph:
-            etree.SubElement(
-                nv_pr,
-                "{http://schemas.openxmlformats.org/presentationml/2006/main}ph",
-                attrib={"type": "subTitle", "idx": "1"}
-            )
-        else:
-            existing_ph[0].set("type", "subTitle")
-
-    def _convert_to_body_placeholder(self, shape_elem, idx: str = "1") -> None:
+    def _convert_to_body_placeholder(self, shape_elem, sp_tree=None, idx: Optional[str] = None) -> None:
         """
         Converts standalone body text box into native slide body placeholder.
-        Adds <p:ph type="body" idx="1"/> into <p:nvSpPr><p:nvPr>.
-        Preserves all geometry, font, color, text, and IDs.
+        Allocates non-colliding index, freezes spacing/bullet isolation, and freezes autofit.
         """
-        nv_prs = _safe_xpath(shape_elem, ".//p:nvSpPr/p:nvPr")
-        if not nv_prs:
-            nv_sp_prs = _safe_xpath(shape_elem, ".//p:nvSpPr")
-            if nv_sp_prs:
-                nv_pr = etree.SubElement(nv_sp_prs[0], "{http://schemas.openxmlformats.org/presentationml/2006/main}nvPr")
-            else:
-                return
-        else:
-            nv_pr = nv_prs[0]
-
-        existing_ph = _safe_xpath(nv_pr, ".//p:ph")
-        if not existing_ph:
-            etree.SubElement(
-                nv_pr,
-                "{http://schemas.openxmlformats.org/presentationml/2006/main}ph",
-                attrib={"type": "body", "idx": str(idx)}
-            )
-        else:
-            existing_ph[0].set("type", "body")
-            if "idx" not in existing_ph[0].attrib:
-                existing_ph[0].set("idx", str(idx))
+        if isinstance(sp_tree, str):
+            idx = sp_tree
+            sp_tree = None
+        self.engine.ensure_placeholder(
+            shape_elem,
+            "body",
+            sp_tree=sp_tree,
+            preferred_idx=idx,
+            freeze_styles=True,
+            rename_content=False,
+        )
 
     def _execute_create_new(
         self,
@@ -564,6 +567,26 @@ class PlaceholderTransformer:
                 differences.append({
                     "category": DifferenceCategory.UNINTENDED_STRUCTURAL_CHANGE.value,
                     "description": err
+                })
+
+        # 8. Placeholder index uniqueness check (no duplicate idx on slide)
+        used_indices: Dict[str, List[int]] = {}
+        for sp in _safe_xpath(sp_tree, ".//p:sp|.//p:pic|.//p:graphicFrame|.//p:cxnSp"):
+            ph_nodes = _safe_xpath(sp, ".//p:ph")
+            if ph_nodes:
+                idx_val = ph_nodes[0].get("idx")
+                if idx_val is not None:
+                    nv_id = _safe_xpath(sp, ".//p:cNvPr/@id")
+                    s_id = int(nv_id[0]) if nv_id and nv_id[0].isdigit() else -1
+                    used_indices.setdefault(idx_val, []).append(s_id)
+        for idx_val, s_ids in used_indices.items():
+            if len(s_ids) > 1:
+                err = f"Duplicate placeholder index idx={idx_val} detected on shapes {s_ids}"
+                errors.append(err)
+                differences.append({
+                    "category": DifferenceCategory.VERIFICATION_FAILURE.value,
+                    "description": err,
+                    "shape_ids": s_ids
                 })
 
         # Record expected accessibility changes for newly converted or created shapes
