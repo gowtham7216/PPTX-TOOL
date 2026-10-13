@@ -28,6 +28,16 @@ from rules.placeholders.classifier import (
 )
 from rules.placeholders.placeholder_engine_v2 import PlaceholderEngineV2
 
+try:
+    import ConvertPlaceholder_v2 as cp_v2
+except ImportError:
+    import sys
+    from pathlib import Path
+    root_dir = str(Path(__file__).resolve().parents[2])
+    if root_dir not in sys.path:
+        sys.path.insert(0, root_dir)
+    import ConvertPlaceholder_v2 as cp_v2
+
 logger = logging.getLogger(__name__)
 
 
@@ -90,6 +100,7 @@ class PlaceholderTransformer:
 
         # 1. Record original shape IDs, text, geometry, and snapshot XML for atomic rollback
         original_shape_ids = self._collect_shape_ids(sp_tree)
+        original_shape_ids_list = self._collect_shape_ids_list(sp_tree)
         original_sp_tree_xml = etree.tostring(sp_tree)
         original_text_map = self._collect_text_map(sp_tree)
         original_xfrm_map = self._collect_xfrm_map(sp_tree)
@@ -154,10 +165,10 @@ class PlaceholderTransformer:
                     result.placeholders_preserved += 1
                     result.preserved_shape_ids.append(shape_id)
 
-        # 4. Post-conversion comprehensive integrity verification & Rollback if unsafe
         safe, verify_errors = self.verify_integrity(
             sp_tree=sp_tree,
             original_shape_ids=original_shape_ids,
+            original_shape_ids_list=original_shape_ids_list,
             animation_target_ids=anim_targets,
             original_text_map=original_text_map,
             original_xfrm_map=original_xfrm_map,
@@ -198,243 +209,105 @@ class PlaceholderTransformer:
         raw_slide=None
     ) -> Optional[int]:
         """
-        Executes physical XML mutation for an individual approved shape.
+        Executes physical XML mutation for an individual approved shape using ConvertPlaceholder_v2 logic.
         """
-        # CASE A: CREATE_NEW
-        if analysis.action == ConversionAction.CREATE_NEW:
-            return self._execute_create_new(analysis, sp_tree, raw_slide=raw_slide)
-
         shape_elem = analysis.raw_element
         if shape_elem is None:
             raise ValueError(f"Shape {analysis.shape_id} raw_element is None.")
 
-        # CASE B: Standalone title text box -> Add native title placeholder tag
-        if (
-            analysis.category == PlaceholderCategory.STANDALONE_TITLE_BOX
-            or (analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type in ("title", "ctrtitle"))
-        ):
-            self._convert_to_title_placeholder(shape_elem, sp_tree=sp_tree)
+        # Check if already a placeholder or marked decorative
+        if cp_v2.has_ph(shape_elem):
+            logger.info("Preserving existing native placeholder for Shape %d", analysis.shape_id)
             return None
 
-        # CASE C: Standalone subtitle text box -> Add native subtitle placeholder tag
-        if (
-            analysis.category == PlaceholderCategory.STANDALONE_SUBTITLE_BOX
-            or (analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type == "subTitle")
-        ):
-            self._convert_to_subtitle_placeholder(shape_elem, sp_tree=sp_tree, idx=analysis.placeholder_idx)
+        if cp_v2.has_existing_decorative_mark(shape_elem):
+            logger.info("Preserving decorative shape %d", analysis.shape_id)
             return None
 
-        # CASE D: Standalone body text box -> Add native body placeholder tag
-        if (
-            analysis.category == PlaceholderCategory.STANDALONE_BODY_BOX
-            or (analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type == "body" and not analysis.has_ph)
-        ):
-            self._convert_to_body_placeholder(shape_elem, sp_tree=sp_tree, idx=analysis.placeholder_idx)
+        # Determine target placeholder type from analysis
+        target_type = (analysis.proposed_placeholder_type or "").lower()
+        if not target_type or target_type == "none":
+            if analysis.is_picture:
+                target_type = "pic"
+            elif analysis.is_table:
+                target_type = "tbl"
+            elif analysis.category == PlaceholderCategory.STANDALONE_TITLE_BOX:
+                target_type = "title"
+            elif analysis.category == PlaceholderCategory.STANDALONE_SUBTITLE_BOX:
+                target_type = "subTitle"
+            else:
+                target_type = "body"
+
+        # Determine non-colliding index
+        idx_val = None
+        if target_type not in ("title", "ctrtitle"):
+            used = set()
+            if sp_tree is not None:
+                for ph_node in _safe_xpath(sp_tree, ".//p:ph[@idx]"):
+                    v = ph_node.get("idx")
+                    if v and v.isdigit():
+                        used.add(int(v))
+            if analysis.placeholder_idx and str(analysis.placeholder_idx).isdigit() and int(analysis.placeholder_idx) not in used:
+                idx_val = int(analysis.placeholder_idx)
+            else:
+                cand = 1
+                while cand in used:
+                    cand += 1
+                idx_val = cand
+
+        tag = etree.QName(shape_elem).localname
+
+        # Conversion for body / picture / table shapes using ConvertPlaceholder_v2 functions
+        if target_type in ("body", "pic", "tbl"):
+            if target_type == "body" and tag == "sp":
+                cp_v2.freeze_paragraph_properties(shape_elem)
+                cp_v2.backfill_run_sizes(shape_elem)
+            cp_v2.freeze_autofit(shape_elem)
+            cp_v2.add_placeholder(shape_elem, target_type, idx_val)
             return None
 
-        # CASE D2: Standalone picture -> Add native pic placeholder tag
-        if (
-            analysis.category == PlaceholderCategory.PICTURE
-            or analysis.proposed_placeholder_type == "pic"
-        ) and not analysis.has_ph:
-            self.engine.ensure_placeholder(
-                shape_elem,
-                "pic",
-                sp_tree=sp_tree,
-                preferred_idx=analysis.placeholder_idx,
-                freeze_styles=False,
-                rename_content=False,
-            )
+        elif target_type in ("title", "ctrtitle"):
+            if tag == "sp":
+                cp_v2.freeze_paragraph_properties(shape_elem)
+                cp_v2.freeze_autofit(shape_elem)
+                cp_v2.backfill_run_sizes(shape_elem)
+            nv = cp_v2.get_nv_container(shape_elem)
+            if nv is not None:
+                nvpr = nv.find(cp_v2.qn("p", "nvPr"))
+                if nvpr is None:
+                    nvpr = etree.SubElement(nv, cp_v2.qn("p", "nvPr"))
+                if nvpr.find(cp_v2.qn("p", "ph")) is None:
+                    ph = etree.Element(cp_v2.qn("p", "ph"), attrib={"type": target_type})
+                    nvpr.insert(0, ph)
             return None
 
-        # CASE D3: Standalone table -> Add native tbl placeholder tag
-        if (
-            analysis.category == PlaceholderCategory.TABLE
-            or analysis.proposed_placeholder_type == "tbl"
-        ) and not analysis.has_ph:
-            self.engine.ensure_placeholder(
-                shape_elem,
-                "tbl",
-                sp_tree=sp_tree,
-                preferred_idx=analysis.placeholder_idx,
-                freeze_styles=False,
-                rename_content=False,
-            )
+        elif target_type == "subtitle":
+            if tag == "sp":
+                cp_v2.freeze_paragraph_properties(shape_elem)
+                cp_v2.freeze_autofit(shape_elem)
+                cp_v2.backfill_run_sizes(shape_elem)
+            nv = cp_v2.get_nv_container(shape_elem)
+            if nv is not None:
+                nvpr = nv.find(cp_v2.qn("p", "nvPr"))
+                if nvpr is None:
+                    nvpr = etree.SubElement(nv, cp_v2.qn("p", "nvPr"))
+                if nvpr.find(cp_v2.qn("p", "ph")) is None:
+                    ph = etree.Element(cp_v2.qn("p", "ph"), attrib={"type": "subTitle", "idx": str(idx_val)})
+                    nvpr.insert(0, ph)
             return None
 
-        # CASE E: Safe Native Body / Object placeholder -> Materialize inherited geometry and detach ph
-        if (
-            analysis.action == ConversionAction.CONVERT_EXISTING
-            and analysis.category in (PlaceholderCategory.BODY, PlaceholderCategory.OBJECT)
-            and analysis.has_ph
-        ):
-            self._materialize_and_detach_placeholder(shape_elem, analysis)
+        elif target_type == "decorative":
+            cp_v2.mark_decorative(shape_elem)
             return None
 
-        logger.info("No conversion needed for Shape %d (category: %s)", analysis.shape_id, analysis.category)
         return None
-
-    def _convert_to_title_placeholder(self, shape_elem, sp_tree=None) -> None:
-        """
-        Converts standalone text box into native slide title placeholder.
-        Preserves all geometry, font, color, text, and IDs.
-        """
-        self.engine.ensure_placeholder(
-            shape_elem,
-            "title",
-            sp_tree=sp_tree,
-            freeze_styles=False,
-            rename_content=False,
-        )
-
-    def _convert_to_subtitle_placeholder(self, shape_elem, sp_tree=None, idx: Optional[str] = None) -> None:
-        """
-        Converts standalone text box into native slide subtitle placeholder.
-        Allocates non-colliding index and freezes spacing/bullet isolation.
-        """
-        if isinstance(sp_tree, str):
-            idx = sp_tree
-            sp_tree = None
-        self.engine.ensure_placeholder(
-            shape_elem,
-            "subTitle",
-            sp_tree=sp_tree,
-            preferred_idx=idx,
-            freeze_styles=True,
-            rename_content=False,
-        )
-
-    def _convert_to_body_placeholder(self, shape_elem, sp_tree=None, idx: Optional[str] = None) -> None:
-        """
-        Converts standalone body text box into native slide body placeholder.
-        Allocates non-colliding index, freezes spacing/bullet isolation, and freezes autofit.
-        """
-        if isinstance(sp_tree, str):
-            idx = sp_tree
-            sp_tree = None
-        self.engine.ensure_placeholder(
-            shape_elem,
-            "body",
-            sp_tree=sp_tree,
-            preferred_idx=idx,
-            freeze_styles=True,
-            rename_content=False,
-        )
-
-    def _execute_create_new(
-        self,
-        analysis: PlaceholderAnalysis,
-        sp_tree,
-        raw_slide=None
-    ) -> int:
-        """
-        Creates a new native placeholder shape inside spTree.
-        Gated by the 7 strict safety gates.
-        """
-        existing_ids = self._collect_shape_ids(sp_tree)
-        new_id = max(existing_ids, default=1) + 1
-        while new_id in existing_ids:
-            new_id += 1
-
-        ph_type = analysis.proposed_placeholder_type or "body"
-        ph_idx = analysis.placeholder_idx or "1"
-        name = f"Placeholder {new_id}"
-
-        # Resolve layout geometry if available
-        off_x, off_y, cx, cy = 914400, 1828800, 7315200, 3657600  # Default EMU
-        if analysis.inherited_properties and analysis.inherited_properties.xfrm_emu:
-            off_x, off_y, cx, cy = analysis.inherited_properties.xfrm_emu
-
-        # Create shape XML element
-        sp = etree.SubElement(sp_tree, "{http://schemas.openxmlformats.org/presentationml/2006/main}sp")
-        nv_sp_pr = etree.SubElement(sp, "{http://schemas.openxmlformats.org/presentationml/2006/main}nvSpPr")
-        etree.SubElement(nv_sp_pr, "{http://schemas.openxmlformats.org/presentationml/2006/main}cNvPr", attrib={"id": str(new_id), "name": name})
-        etree.SubElement(nv_sp_pr, "{http://schemas.openxmlformats.org/presentationml/2006/main}cNvSpPr", attrib={"txBox": "1"})
-        nv_pr = etree.SubElement(nv_sp_pr, "{http://schemas.openxmlformats.org/presentationml/2006/main}nvPr")
-        etree.SubElement(nv_pr, "{http://schemas.openxmlformats.org/presentationml/2006/main}ph", attrib={"type": ph_type, "idx": str(ph_idx)})
-
-        sp_pr = etree.SubElement(sp, "{http://schemas.openxmlformats.org/presentationml/2006/main}spPr")
-        xfrm = etree.SubElement(sp_pr, "{http://schemas.openxmlformats.org/drawingml/2006/main}xfrm")
-        etree.SubElement(xfrm, "{http://schemas.openxmlformats.org/drawingml/2006/main}off", attrib={"x": str(off_x), "y": str(off_y)})
-        etree.SubElement(xfrm, "{http://schemas.openxmlformats.org/drawingml/2006/main}ext", attrib={"cx": str(cx), "cy": str(cy)})
-        prst_geom = etree.SubElement(sp_pr, "{http://schemas.openxmlformats.org/drawingml/2006/main}prstGeom", attrib={"prst": "rect"})
-        etree.SubElement(prst_geom, "{http://schemas.openxmlformats.org/drawingml/2006/main}avLst")
-
-        tx_body = etree.SubElement(sp, "{http://schemas.openxmlformats.org/presentationml/2006/main}txBody")
-        etree.SubElement(tx_body, "{http://schemas.openxmlformats.org/drawingml/2006/main}bodyPr")
-        etree.SubElement(tx_body, "{http://schemas.openxmlformats.org/drawingml/2006/main}lstStyle")
-        p_elem = etree.SubElement(tx_body, "{http://schemas.openxmlformats.org/drawingml/2006/main}p")
-        etree.SubElement(p_elem, "{http://schemas.openxmlformats.org/drawingml/2006/main}endParaRPr")
-
-        analysis.raw_element = sp
-        analysis.shape_id = new_id
-        return new_id
-
-    def _materialize_and_detach_placeholder(
-        self,
-        shape_elem,
-        analysis: PlaceholderAnalysis
-    ) -> None:
-        """
-        Converts a body/object placeholder into a self-contained shape.
-        1. Materializes inherited <a:xfrm> into <p:spPr> if absent on slide.
-        2. Removes <p:ph> tag from <p:nvPr>.
-        3. Preserves exact shape ID, text frames, formatting, and relationships.
-        """
-        sp_prs = _safe_xpath(shape_elem, ".//p:spPr")
-        if not sp_prs:
-            sp_pr = etree.SubElement(shape_elem, "{http://schemas.openxmlformats.org/presentationml/2006/main}spPr")
-        else:
-            sp_pr = sp_prs[0]
-
-        # 1. Materialize <a:xfrm> if missing on slide
-        existing_xfrm = _safe_xpath(sp_pr, ".//a:xfrm")
-        if not existing_xfrm:
-            inherited = analysis.inherited_properties
-            if inherited.xfrm_emu:
-                off_x, off_y, ext_cx, ext_cy = inherited.xfrm_emu
-                xfrm = etree.Element("{http://schemas.openxmlformats.org/drawingml/2006/main}xfrm")
-                if inherited.rotation:
-                    xfrm.set("rot", str(inherited.rotation))
-                if inherited.flip_h:
-                    xfrm.set("flipH", "1")
-                if inherited.flip_v:
-                    xfrm.set("flipV", "1")
-
-                etree.SubElement(
-                    xfrm,
-                    "{http://schemas.openxmlformats.org/drawingml/2006/main}off",
-                    attrib={"x": str(off_x), "y": str(off_y)}
-                )
-                etree.SubElement(
-                    xfrm,
-                    "{http://schemas.openxmlformats.org/drawingml/2006/main}ext",
-                    attrib={"cx": str(ext_cx), "cy": str(ext_cy)}
-                )
-                sp_pr.insert(0, xfrm)
-
-        # 2. Ensure preset geometry exists
-        existing_geom = _safe_xpath(sp_pr, ".//a:prstGeom") or _safe_xpath(sp_pr, ".//a:custGeom")
-        if not existing_geom:
-            prst = etree.SubElement(
-                sp_pr,
-                "{http://schemas.openxmlformats.org/drawingml/2006/main}prstGeom",
-                attrib={"prst": "rect"}
-            )
-            etree.SubElement(prst, "{http://schemas.openxmlformats.org/drawingml/2006/main}avLst")
-
-        # 3. Detach <p:ph> tag from <p:nvPr>
-        ph_elems = _safe_xpath(shape_elem, ".//p:ph")
-        for ph in ph_elems:
-            parent = ph.getparent()
-            if parent is not None:
-                parent.remove(ph)
 
     def verify_integrity(
         self,
         sp_tree,
         original_shape_ids: Set[int],
         animation_target_ids: Set[int],
+        original_shape_ids_list: Optional[List[int]] = None,
         original_text_map: Optional[Dict[int, str]] = None,
         original_xfrm_map: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
         original_group_count: Optional[int] = None,
@@ -447,6 +320,7 @@ class PlaceholderTransformer:
         safe, errors, _ = self.verify_integrity_comprehensive(
             sp_tree=sp_tree,
             original_shape_ids=original_shape_ids,
+            original_shape_ids_list=original_shape_ids_list,
             original_text_map=original_text_map,
             original_xfrm_map=original_xfrm_map,
             original_group_count=original_group_count,
@@ -460,6 +334,7 @@ class PlaceholderTransformer:
         self,
         sp_tree,
         original_shape_ids: Set[int],
+        original_shape_ids_list: Optional[List[int]] = None,
         original_text_map: Optional[Dict[int, str]] = None,
         original_xfrm_map: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
         original_group_count: Optional[int] = None,
@@ -499,13 +374,18 @@ class PlaceholderTransformer:
                     "shape_id": a_id
                 })
 
-        # 3. Duplicate ID prevention
+        # 3. Duplicate ID prevention (only newly introduced duplicates)
+        orig_counts: Dict[int, int] = {}
+        if original_shape_ids_list is not None:
+            for s_id in original_shape_ids_list:
+                orig_counts[s_id] = orig_counts.get(s_id, 0) + 1
+
         all_ids_list = self._collect_shape_ids_list(sp_tree)
         counts: Dict[int, int] = {}
         for s_id in all_ids_list:
             counts[s_id] = counts.get(s_id, 0) + 1
 
-        dupes = [s_id for s_id, count in counts.items() if count > 1]
+        dupes = [s_id for s_id, count in counts.items() if count > 1 and count > orig_counts.get(s_id, 0)]
         if dupes:
             err = f"Duplicate shape IDs detected after conversion: {dupes}"
             errors.append(err)

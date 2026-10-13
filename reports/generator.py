@@ -48,9 +48,17 @@ class ReportGenerator:
         unique_remediated = intel_summary.get("remediated_count", m.remediated_issues)
         unique_unresolved = total_unique_post
 
-        raw_pre_count = m.total_issues
-        raw_post_count = post_m.total_issues if post_m else (raw_pre_count - m.raw_remediated_issues if m.raw_remediated_issues else raw_pre_count)
-        raw_remediated_count = m.raw_remediated_issues or max(0, raw_pre_count - raw_post_count)
+        raw_pre_count = intel_summary.get("raw_issues_pre", m.total_issues) if intel_summary.get("raw_issues_pre") else m.total_issues
+        raw_post_count = (
+            intel_summary.get("raw_issues_post")
+            if intel_summary.get("raw_issues_post") is not None
+            else (post_m.total_issues if post_m else (raw_pre_count - m.raw_remediated_issues if m.raw_remediated_issues else raw_pre_count))
+        )
+        raw_remediated_count = (
+            intel_summary.get("raw_issues_remediated")
+            if intel_summary.get("raw_issues_remediated") is not None
+            else (m.raw_remediated_issues or max(0, raw_pre_count - raw_post_count))
+        )
 
         total_post_issues_str = str(unique_unresolved) if stage_val == "COMPLETED" or context.remediation_actions else "Pending"
         remediated_str = str(unique_remediated)

@@ -12,7 +12,7 @@ Preserves slide, shape, and rule traceability.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 
 from models.unified_issue import UnifiedIssue, ReconciliationStatus
 from models.issue import Issue
@@ -91,11 +91,124 @@ class ReconciliationSummary:
 class IssueReconciliationService:
     """Reconciles pre-remediation audit issues against post-remediation analysis."""
 
+    RULE_FAMILY_MAP: Dict[str, Set[str]] = {
+        "SG-RO-01": {"SG-RO-01", "SG-RO-VAL-01", "PIPELINE_STEP_1_READING_ORDER"},
+        "SG-RO-VAL-01": {"SG-RO-01", "SG-RO-VAL-01", "PIPELINE_STEP_1_READING_ORDER"},
+        "PIPELINE_STEP_1_READING_ORDER": {"SG-RO-01", "SG-RO-VAL-01", "PIPELINE_STEP_1_READING_ORDER"},
+        "SG-GRP-01": {"SG-GRP-01", "PIPELINE_STEP_2_UNGROUPING"},
+        "PIPELINE_STEP_2_UNGROUPING": {"SG-GRP-01", "PIPELINE_STEP_2_UNGROUPING"},
+        "SG-PH-01": {"SG-PH-01", "SG-TTL-01", "PIPELINE_STEP_3_PLACEHOLDERS"},
+        "PIPELINE_STEP_3_PLACEHOLDERS": {"SG-PH-01", "SG-TTL-01", "PIPELINE_STEP_3_PLACEHOLDERS"},
+        "SG-LST-01": {"SG-LST-01", "PIPELINE_STEP_4_LISTS"},
+        "PIPELINE_STEP_4_LISTS": {"SG-LST-01", "PIPELINE_STEP_4_LISTS"},
+        "SG-TTL-01": {"SG-TTL-01", "SG-PH-01", "PIPELINE_STEP_5_ACCESSIBILITY"},
+        "SG-DEC-01": {"SG-DEC-01", "PIPELINE_STEP_5_ACCESSIBILITY"},
+        "SG-TBL-01": {"SG-TBL-01", "PIPELINE_STEP_5_ACCESSIBILITY"},
+        "SG-LNG-01": {"SG-LNG-01", "PIPELINE_STEP_5_ACCESSIBILITY"},
+        "SG-META-01": {"SG-META-01", "PIPELINE_STEP_5_ACCESSIBILITY"},
+        "SG-ALT-01": {"SG-ALT-01", "PIPELINE_STEP_5_ACCESSIBILITY"},
+        "PIPELINE_STEP_5_ACCESSIBILITY": {
+            "SG-TTL-01", "SG-DEC-01", "SG-TBL-01", "SG-LNG-01", "SG-META-01", "SG-ALT-01"
+        },
+    }
+
+    def _find_correlated_action(
+        self,
+        issue: UnifiedIssue,
+        actions: List[RemediationAction],
+    ) -> Optional[RemediationAction]:
+        """Correlates an applied remediation action to a UnifiedIssue using stable slide,
+        shape identifiers, and documented cross-rule relationships."""
+        if not actions:
+            return None
+
+        # Collect issue target shapes
+        issue_shapes: Set[int] = set()
+        if issue.shape_id is not None:
+            issue_shapes.add(issue.shape_id)
+        for raw in issue.raw_issues:
+            if getattr(raw, "shape_id", None) is not None:
+                issue_shapes.add(raw.shape_id)
+            if getattr(raw, "extra_data", None):
+                if raw.extra_data.get("candidate_shape_id") is not None:
+                    issue_shapes.add(raw.extra_data["candidate_shape_id"])
+                if raw.extra_data.get("group_id") is not None:
+                    issue_shapes.add(raw.extra_data["group_id"])
+
+        # Collect issue rule IDs and family
+        issue_rules: Set[str] = {issue.primary_rule_id}
+        issue_rules.update(issue.related_rule_ids)
+        issue_rules.update(r.rule_id for r in issue.raw_issues if getattr(r, "rule_id", None))
+
+        rule_family: Set[str] = set()
+        for r in issue_rules:
+            rule_family.update(self.RULE_FAMILY_MAP.get(r, {r}))
+
+        # Best match candidates
+        exact_shape_matches = []
+        slide_level_matches = []
+
+        for action in actions:
+            if action.status != RemediationStatus.APPLIED:
+                continue
+
+            # Slide match check
+            slide_matches = (action.slide_number == issue.slide_number) or (action.slide_number == 0)
+            if not slide_matches:
+                continue
+
+            # Action rule family
+            act_rules = {action.rule_id} if action.rule_id else set()
+            act_family = set().union(*(self.RULE_FAMILY_MAP.get(r, {r}) for r in act_rules))
+            rule_matches = bool(act_family & issue_rules or act_rules & rule_family)
+
+            # Action target shapes
+            act_shapes: Set[int] = set()
+            if action.target_shape_id is not None:
+                act_shapes.add(action.target_shape_id)
+            orig_st = getattr(action, "original_state", {}) or {}
+            if isinstance(orig_st, dict):
+                for k in ("shape_id", "group_id", "candidate_shape_id"):
+                    val = orig_st.get(k)
+                    if val is not None:
+                        act_shapes.add(val)
+            rem_st = getattr(action, "remediated_state", {}) or {}
+            if isinstance(rem_st, dict):
+                for sid in rem_st.get("converted_shape_ids", []):
+                    act_shapes.add(sid)
+                for sid in rem_st.get("extracted_shape_ids", []):
+                    act_shapes.add(sid)
+                for target in rem_st.get("remediated_targets", []):
+                    if isinstance(target, (list, tuple)) and len(target) >= 1:
+                        act_shapes.add(target[0])
+
+            # Evaluate match quality
+            if issue.shape_id is not None:
+                # Shape-level issue
+                if act_shapes and (act_shapes & issue_shapes):
+                    if rule_matches:
+                        exact_shape_matches.append(action)
+                elif not act_shapes and rule_matches and action.slide_number == issue.slide_number:
+                    slide_level_matches.append(action)
+            else:
+                # Slide-level issue (e.g. reading order, presentation language)
+                if rule_matches:
+                    if not act_shapes or action.slide_number == issue.slide_number:
+                        slide_level_matches.append(action)
+
+        if exact_shape_matches:
+            return exact_shape_matches[0]
+        if slide_level_matches:
+            return slide_level_matches[0]
+        return None
+
     def reconcile(
         self,
         pre_issues: List[UnifiedIssue],
         post_issues: List[UnifiedIssue],
         remediation_actions: Optional[List[RemediationAction]] = None,
+        raw_pre_issues: Optional[List[Issue]] = None,
+        raw_post_issues: Optional[List[Issue]] = None,
     ) -> ReconciliationSummary:
         """Compares pre and post unified issues and assigns reconciliation statuses."""
         remediation_actions = remediation_actions or []
@@ -104,21 +217,27 @@ class IssueReconciliationService:
             total_post=len(post_issues),
         )
 
-        # Index applied actions by (slide_number, target_shape_id) and by rule_id
-        applied_by_target = {}
-        for action in remediation_actions:
-            if action.status == RemediationStatus.APPLIED:
-                key = (action.slide_number, action.target_shape_id)
-                applied_by_target[key] = action
-                if action.rule_id:
-                    applied_by_target[(action.slide_number, action.rule_id)] = action
-                if action.target_shape_id is not None:
-                    applied_by_target[(action.slide_number, action.target_shape_id)] = action
-                # Also index converted shape IDs from action remediated_state
-                rem_state = getattr(action, "remediated_state", {}) or {}
-                if isinstance(rem_state, dict):
-                    for cid in rem_state.get("converted_shape_ids", []):
-                        applied_by_target[(action.slide_number, cid)] = action
+        # Track distinct raw rule violations counts
+        if raw_pre_issues is not None:
+            summary.raw_issues_pre = len(raw_pre_issues)
+            summary.raw_issues_post = len(raw_post_issues or [])
+            from collections import Counter
+            post_counts = Counter(
+                (issue.slide_number, issue.shape_id, getattr(issue, "rule_id", ""))
+                for issue in (raw_post_issues or [])
+            )
+            raw_rem = 0
+            for issue in raw_pre_issues:
+                k = (issue.slide_number, issue.shape_id, getattr(issue, "rule_id", ""))
+                if post_counts[k] > 0:
+                    post_counts[k] -= 1
+                else:
+                    raw_rem += 1
+            summary.raw_issues_remediated = raw_rem
+        elif any(getattr(u, "raw_issues", None) for u in pre_issues):
+            summary.raw_issues_pre = sum(len(u.raw_issues) for u in pre_issues)
+            summary.raw_issues_post = sum(len(u.raw_issues) for u in post_issues)
+            summary.raw_issues_remediated = max(0, summary.raw_issues_pre - summary.raw_issues_post)
 
         # Index post issues by match key: (slide_number, shape_id, primary_rule_id)
         post_by_key = {}
@@ -133,15 +252,8 @@ class IssueReconciliationService:
             key = (pre.slide_number, pre.shape_id, pre.primary_rule_id)
             matching_post = post_by_key.get(key)
 
-            # Check if an applied remediation targeted this issue
-            action = (
-                applied_by_target.get((pre.slide_number, pre.shape_id))
-                or applied_by_target.get((pre.slide_number, pre.primary_rule_id))
-            )
-            if not action and pre.primary_rule_id == "SG-RO-VAL-01":
-                action = applied_by_target.get((pre.slide_number, "SG-RO-01"))
-            if not action and pre.shape_id is None:
-                action = applied_by_target.get((pre.slide_number, None))
+            # Check if an applied remediation targeted this issue using stable identifiers
+            action = self._find_correlated_action(pre, remediation_actions)
 
             # Check if post has a remnant issue from pre's cluster on same shape/slide
             remnant_post = None

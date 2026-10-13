@@ -419,31 +419,37 @@ class AppController:
                 context.unified_issues = correlator.correlate(context.rule_results)
 
             post_unified_issues = correlator.correlate(post_rule_results)
+            raw_pre_issues = [issue for res in context.rule_results for issue in res.issues]
+            raw_post_issues = [issue for res in post_rule_results for issue in res.issues]
             reconciler = IssueReconciliationService()
             reconciliation_actions = getattr(context, "detailed_remediation_actions", None) or context.remediation_actions
             reconciliation_summary = reconciler.reconcile(
                 pre_issues=context.unified_issues,
                 post_issues=post_unified_issues,
-                remediation_actions=reconciliation_actions
+                remediation_actions=reconciliation_actions,
+                raw_pre_issues=raw_pre_issues,
+                raw_post_issues=raw_post_issues,
             )
 
             # Update verification & remediation statuses in context.rule_results
-            post_issue_keys = {
+            from collections import Counter
+            post_issue_counts = Counter(
                 (issue.slide_number, issue.shape_id, res.rule_id)
                 for res in post_rule_results for issue in res.issues
-            }
+            )
             from models.enums import AccessibilityStatus
             for res in context.rule_results:
                 for issue in res.issues:
                     key = (issue.slide_number, issue.shape_id, res.rule_id)
-                    if key not in post_issue_keys:
-                        issue.status = AccessibilityStatus.REMEDIATED
+                    if post_issue_counts[key] > 0:
+                        post_issue_counts[key] -= 1
                         issue.verification_status = "VERIFIED"
                     else:
+                        issue.status = AccessibilityStatus.REMEDIATED
                         issue.verification_status = "VERIFIED"
 
-            raw_pre_count = sum(len(res.issues) for res in context.rule_results)
-            raw_post_count = sum(len(res.issues) for res in post_rule_results)
+            raw_pre_count = len(raw_pre_issues)
+            raw_post_count = len(raw_post_issues)
             raw_remediated_count = sum(1 for res in context.rule_results for issue in res.issues if issue.status == AccessibilityStatus.REMEDIATED)
             raw_unresolved_count = len([i for res in context.rule_results for i in res.issues if i.status != AccessibilityStatus.REMEDIATED])
 

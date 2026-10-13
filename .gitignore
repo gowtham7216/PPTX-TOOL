@@ -46,6 +46,8 @@ workspace_runs/
 temp/
 output/
 scratch/
+scratch_*.pptx
+*.pre_v2_backup
 *.log
 *.pyc
 

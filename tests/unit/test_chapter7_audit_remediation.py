@@ -517,3 +517,213 @@ def test_reconciliation_no_remediated_zero_when_actions_applied():
     summary_with_action = reconciler.reconcile(pre_issues=[pre_issue], post_issues=[], remediation_actions=[action])
     assert summary_with_action.remediated_count == 1
     assert summary_with_action.items[0].status == ReconciliationStatus.REMEDIATED
+
+
+def test_reconciliation_successful_remediation_distinct_counts():
+    """Verifies successful remediation where raw rule violations resolved (4)
+    and unified issues remediated (2) are tracked as distinct metrics without forcing equality."""
+    # Raw issues: 2 for reading order (SG-RO-01 + SG-RO-VAL-01), 2 for title (SG-TTL-01 + SG-PH-01)
+    ro_raw_1 = Issue(
+        issue_id="ro_1", slide_number=1, shape_id=None, rule_id="SG-RO-01", rule_name="RO",
+        severity=IssueSeverity.WARNING, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        description="Reading order non-sequential", recommendation="Reorder",
+    )
+    ro_raw_2 = Issue(
+        issue_id="ro_val_1", slide_number=1, shape_id=None, rule_id="SG-RO-VAL-01", rule_name="RO-VAL",
+        severity=IssueSeverity.WARNING, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        description="Reading order validation failed", recommendation="Verify sequence",
+    )
+    ttl_raw_1 = Issue(
+        issue_id="ttl_1", slide_number=1, shape_id=7, rule_id="SG-TTL-01", rule_name="TTL",
+        severity=IssueSeverity.ERROR, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        description="Missing title", recommendation="Promote text box",
+    )
+    ttl_raw_2 = Issue(
+        issue_id="ph_1", slide_number=1, shape_id=7, rule_id="SG-PH-01", rule_name="PH",
+        severity=IssueSeverity.WARNING, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        description="Not native placeholder", recommendation="Convert to placeholder",
+    )
+
+    # 2 Unified issues representing the 4 raw findings
+    u_ro = UnifiedIssue(
+        unified_id="UI_1_DOC_SG-RO-01", slide_number=1, shape_id=None, primary_rule_id="SG-RO-01",
+        related_rule_ids=["SG-RO-VAL-01"], severity=IssueSeverity.WARNING,
+        status=AccessibilityStatus.SAFE_TO_REMEDIATE, raw_issues=[ro_raw_1, ro_raw_2],
+        explanation="Reading sequence invalid", recommended_action="Reorder shapes",
+    )
+    u_ttl = UnifiedIssue(
+        unified_id="UI_1_7_SG-TTL-01", slide_number=1, shape_id=7, primary_rule_id="SG-TTL-01",
+        related_rule_ids=["SG-PH-01"], severity=IssueSeverity.ERROR,
+        status=AccessibilityStatus.SAFE_TO_REMEDIATE, raw_issues=[ttl_raw_1, ttl_raw_2],
+        explanation="Missing title placeholder", recommended_action="Promote shape 7",
+    )
+
+    actions = [
+        RemediationAction(
+            action_id="act_ro_1", rule_id="SG-RO-01", slide_number=1,
+            description="Reordered slide 1 shapes in-place", status=RemediationStatus.APPLIED, confidence=0.95
+        ),
+        RemediationAction(
+            action_id="act_ttl_1", rule_id="SG-TTL-01", slide_number=1, target_shape_id=7,
+            description="Promoted shape 7 to native title placeholder", status=RemediationStatus.APPLIED, confidence=0.96
+        ),
+    ]
+
+    reconciler = IssueReconciliationService()
+    raw_pre = [ro_raw_1, ro_raw_2, ttl_raw_1, ttl_raw_2]
+    summary = reconciler.reconcile(
+        pre_issues=[u_ro, u_ttl],
+        post_issues=[],
+        remediation_actions=actions,
+        raw_pre_issues=raw_pre,
+        raw_post_issues=[]
+    )
+
+    # Distinct metrics verified:
+    assert summary.total_pre == 2
+    assert summary.total_post == 0
+    assert summary.remediated_count == 2
+    assert summary.resolved_count == 2
+    assert summary.raw_issues_pre == 4
+    assert summary.raw_issues_post == 0
+    assert summary.raw_issues_remediated == 4
+    # Raw resolved (4) != Unified remediated (2)
+    assert summary.raw_issues_remediated != summary.remediated_count
+    assert len(summary.items) == 2
+    assert summary.items[0].action_taken == "Reordered slide 1 shapes in-place"
+    assert summary.items[1].action_taken == "Promoted shape 7 to native title placeholder"
+
+
+def test_reconciliation_multiple_raw_findings_grouped_into_one_unified_issue():
+    """Verifies that when 3 raw findings on one shape are grouped into 1 UnifiedIssue,
+    remediating the primary rule leaves the secondary remnant for manual review,
+    recording 1 unified remediated and 2 raw violations resolved."""
+    raw_ttl = Issue(
+        issue_id="ttl_1", slide_number=1, shape_id=5, rule_id="SG-TTL-01", rule_name="Title Presence",
+        severity=IssueSeverity.ERROR, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        description="Missing title", recommendation="Promote shape 5",
+    )
+    raw_ph = Issue(
+        issue_id="ph_1", slide_number=1, shape_id=5, rule_id="SG-PH-01", rule_name="Placeholder",
+        severity=IssueSeverity.WARNING, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        description="Not native placeholder", recommendation="Convert to placeholder",
+    )
+    raw_cnt = Issue(
+        issue_id="cnt_1", slide_number=1, shape_id=5, rule_id="SG-CNT-01", rule_name="Color Contrast",
+        severity=IssueSeverity.WARNING, behavior=RuleBehavior.MANUAL_REVIEW,
+        description="Low contrast color", recommendation="Adjust contrast",
+    )
+
+    u_pre = UnifiedIssue(
+        unified_id="UI_1_5_SG-TTL-01", slide_number=1, shape_id=5, primary_rule_id="SG-TTL-01",
+        related_rule_ids=["SG-PH-01", "SG-CNT-01"], severity=IssueSeverity.ERROR,
+        status=AccessibilityStatus.SAFE_TO_REMEDIATE, raw_issues=[raw_ttl, raw_ph, raw_cnt],
+        explanation="Title box has low contrast and lacks placeholder tags",
+    )
+
+    action = RemediationAction(
+        action_id="act_title_5", rule_id="SG-TTL-01", slide_number=1, target_shape_id=5,
+        description="Promoted shape 5 to title placeholder", status=RemediationStatus.APPLIED, confidence=0.96
+    )
+
+    # Post-remediation: Title and placeholder are resolved, but contrast remains on shape 5
+    u_post_remnant = UnifiedIssue(
+        unified_id="UI_1_5_SG-CNT-01", slide_number=1, shape_id=5, primary_rule_id="SG-CNT-01",
+        related_rule_ids=[], severity=IssueSeverity.WARNING, status=AccessibilityStatus.MANUAL_REVIEW,
+        explanation="Low contrast color on shape 5", raw_issues=[raw_cnt],
+    )
+
+    reconciler = IssueReconciliationService()
+    summary = reconciler.reconcile(
+        pre_issues=[u_pre],
+        post_issues=[u_post_remnant],
+        remediation_actions=[action],
+        raw_pre_issues=[raw_ttl, raw_ph, raw_cnt],
+        raw_post_issues=[raw_cnt],
+    )
+
+    assert summary.total_pre == 1
+    assert summary.total_post == 1
+    assert summary.remediated_count == 1
+    assert summary.decomposed_remnants_count == 1
+    assert summary.manual_review_count == 1
+    assert summary.raw_issues_pre == 3
+    assert summary.raw_issues_post == 1
+    assert summary.raw_issues_remediated == 2
+    # Verify distinction
+    assert summary.raw_issues_remediated == 2
+    assert summary.remediated_count == 1
+
+
+def test_reconciliation_unrelated_actions_not_falsely_correlated():
+    """Verifies that remediation actions applied to completely different slides or shapes
+    are not correlated to unrelated issues."""
+    u_cnt = UnifiedIssue(
+        unified_id="UI_3_12_SG-CNT-01", slide_number=3, shape_id=12, primary_rule_id="SG-CNT-01",
+        severity=IssueSeverity.WARNING, status=AccessibilityStatus.SAFE_TO_REMEDIATE,
+        explanation="Low contrast on slide 3 shape 12",
+    )
+    # Action on slide 1 shape 2 (completely different slide and rule)
+    unrelated_action = RemediationAction(
+        action_id="act_title_slide1", rule_id="SG-TTL-01", slide_number=1, target_shape_id=2,
+        description="Promoted shape 2 on slide 1", status=RemediationStatus.APPLIED, confidence=0.95
+    )
+
+    reconciler = IssueReconciliationService()
+    # u_cnt remains post-remediation
+    summary = reconciler.reconcile(
+        pre_issues=[u_cnt],
+        post_issues=[u_cnt],
+        remediation_actions=[unrelated_action],
+    )
+
+    assert summary.total_pre == 1
+    assert summary.total_post == 1
+    assert summary.remediated_count == 0
+    assert summary.unchanged_count == 1
+    assert summary.items[0].action_taken is None
+    assert summary.items[0].status == ReconciliationStatus.UNCHANGED
+
+
+def test_reconciliation_zero_action_cases():
+    """Verifies that when zero actions are applied and issues remain unchanged,
+    remediated_count and raw_issues_remediated remain exactly 0."""
+    raw1 = Issue(
+        issue_id="alt_1", slide_number=2, shape_id=10, rule_id="SG-ALT-01", rule_name="Alt Text",
+        severity=IssueSeverity.ERROR, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        status=AccessibilityStatus.SAFE_TO_REMEDIATE,
+        description="Missing alt", recommendation="Provide alt",
+    )
+    raw2 = Issue(
+        issue_id="cnt_1", slide_number=2, shape_id=10, rule_id="SG-CNT-01", rule_name="Contrast",
+        severity=IssueSeverity.WARNING, behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+        status=AccessibilityStatus.SAFE_TO_REMEDIATE,
+        description="Low contrast", recommendation="Adjust color",
+    )
+
+    u_issue = UnifiedIssue(
+        unified_id="UI_2_10_SG-ALT-01", slide_number=2, shape_id=10, primary_rule_id="SG-ALT-01",
+        related_rule_ids=["SG-CNT-01"], severity=IssueSeverity.ERROR,
+        status=AccessibilityStatus.SAFE_TO_REMEDIATE, raw_issues=[raw1, raw2],
+        explanation="Image lacks alt text and caption has low contrast",
+    )
+
+    reconciler = IssueReconciliationService()
+    summary = reconciler.reconcile(
+        pre_issues=[u_issue],
+        post_issues=[u_issue],
+        remediation_actions=[],
+        raw_pre_issues=[raw1, raw2],
+        raw_post_issues=[raw1, raw2],
+    )
+
+    assert summary.total_pre == 1
+    assert summary.total_post == 1
+    assert summary.remediated_count == 0
+    assert summary.resolved_count == 0
+    assert summary.unchanged_count == 1
+    assert summary.raw_issues_pre == 2
+    assert summary.raw_issues_post == 2
+    assert summary.raw_issues_remediated == 0
+    assert summary.items[0].action_taken is None
+    assert summary.items[0].status == ReconciliationStatus.UNCHANGED

@@ -676,6 +676,15 @@ class RemediationService:
                 for issue in r_res.issues:
                     ph_issues_by_slide.setdefault(issue.slide_number, []).append(issue)
 
+        # Safety fallback: if no prior SG-PH-01 evaluation in rule_results, evaluate on the fly
+        has_ph_evaluation = any(r_res.rule_id == self.ph_rule.rule_id for r_res in context.rule_results)
+        if not has_ph_evaluation and presentation.slides:
+            logger.info("No prior placeholder rule results found; evaluating slides on the fly.")
+            for slide in presentation.slides:
+                issues = self.ph_rule.evaluate(slide, presentation)
+                for issue in issues:
+                    ph_issues_by_slide.setdefault(issue.slide_number, []).append(issue)
+
         converted_count = 0
         ph_affected_slides: Set[int] = set()
         for slide in presentation.slides:
@@ -693,7 +702,7 @@ class RemediationService:
                         rule_id=self.ph_rule.rule_id,
                         slide_number=slide.slide_number,
                         description="Slide placeholders are already compliant or preserved.",
-                        status=RemediationStatus.SKIPPED,
+                        status=RemediationStatus.NO_CHANGES,
                         confidence=1.0,
                         is_user_approved=True
                     )
@@ -909,11 +918,16 @@ class RemediationService:
         post_unified_issues = correlator.correlate(post_rule_results)
 
         # 4. Reconcile pre-remediation vs post-remediation issues
+        raw_pre_issues = [issue for res in context.rule_results for issue in res.issues]
+        raw_post_issues = [issue for res in post_rule_results for issue in res.issues]
+
         reconciler = IssueReconciliationService()
         reconciliation_summary = reconciler.reconcile(
             pre_issues=context.unified_issues,
             post_issues=post_unified_issues,
-            remediation_actions=applied_actions
+            remediation_actions=applied_actions,
+            raw_pre_issues=raw_pre_issues,
+            raw_post_issues=raw_post_issues,
         )
 
         # 5. Compute post-remediation quality metrics
@@ -922,22 +936,25 @@ class RemediationService:
         context.post_accessibility_score = post_metrics.accessibility_score
         context.post_rule_results = post_rule_results
         context.post_metrics = post_metrics
+
         # 6. Reconcile pre-remediation rule_results issue statuses and verification
-        post_issue_keys = {
+        from collections import Counter
+        post_issue_counts = Counter(
             (issue.slide_number, issue.shape_id, res.rule_id)
             for res in post_rule_results for issue in res.issues
-        }
+        )
         for res in context.rule_results:
             for issue in res.issues:
                 key = (issue.slide_number, issue.shape_id, res.rule_id)
-                if key not in post_issue_keys:
-                    issue.status = AccessibilityStatus.REMEDIATED
+                if post_issue_counts[key] > 0:
+                    post_issue_counts[key] -= 1
                     issue.verification_status = "VERIFIED"
                 else:
+                    issue.status = AccessibilityStatus.REMEDIATED
                     issue.verification_status = "VERIFIED"
 
-        raw_pre_count = sum(len(res.issues) for res in context.rule_results)
-        raw_post_count = sum(len(res.issues) for res in post_rule_results)
+        raw_pre_count = len(raw_pre_issues)
+        raw_post_count = len(raw_post_issues)
         raw_remediated_count = sum(1 for res in context.rule_results for issue in res.issues if issue.status == AccessibilityStatus.REMEDIATED)
         raw_unresolved_count = len([i for res in context.rule_results for i in res.issues if i.status != AccessibilityStatus.REMEDIATED])
 

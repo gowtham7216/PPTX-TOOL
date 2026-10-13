@@ -163,16 +163,11 @@ class SlideTitleRule(BaseAccessibilityRule):
             for child in sp_tree:
                 cnvpr = get_cnvpr_element(child)
                 if cnvpr is not None and cnvpr.get("id") == str(candidate_id):
-                    nv_pr_nodes = safe_xpath(child, ".//p:nvSpPr/p:nvPr")
-                    if nv_pr_nodes:
-                        nv_pr = nv_pr_nodes[0]
-                        # Remove existing ph if any
-                        for old_ph in safe_xpath(nv_pr, "./p:ph"):
-                            nv_pr.remove(old_ph)
-                        # Add native title placeholder tag
-                        new_ph = etree.SubElement(nv_pr, f"{{{ns_p}}}ph", attrib={"type": "title"})
-                        promoted = True
-                        break
+                    from rules.placeholders.placeholder_engine_v2 import PlaceholderEngineV2
+                    engine = PlaceholderEngineV2()
+                    res = engine.ensure_placeholder(child, "title", sp_tree=sp_tree)
+                    promoted = res.inserted or (res.reason == "existing-placeholder-preserved")
+                    break
 
             if promoted:
                 # Update in-memory slide title

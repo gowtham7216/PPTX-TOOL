@@ -182,46 +182,49 @@ class PlaceholderRule(BaseAccessibilityRule):
                     )
                 )
 
-            # 5. Native Body / Object placeholder requiring geometry materialization
-            elif analysis.category in (PlaceholderCategory.BODY, PlaceholderCategory.OBJECT) and analysis.has_text:
-                if analysis.is_safe_to_convert:
-                    issues.append(
-                        Issue(
-                            issue_id=f"PH_CONVERT_{slide.slide_number}_{analysis.shape_id}",
-                            rule_id=self.rule_id,
-                            rule_name=self.name,
-                            slide_number=slide.slide_number,
-                            severity=IssueSeverity.INFO,
-                            shape_id=analysis.shape_id,
-                            shape_name=analysis.shape_name,
-                            wcag_mapping=self.wcag_mapping,
-                            description=(
-                                f"Slide {slide.slide_number}: Placeholder '{analysis.shape_name}' (ID {analysis.shape_id}) "
-                                f"contains accessible content. Materializing geometry guarantees design stability."
-                            ),
-                            recommendation=analysis.recommendation,
-                            behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
-                            extra_data=extra_data
-                        )
+            # 4. Standalone picture
+            elif (analysis.category == PlaceholderCategory.PICTURE or analysis.proposed_placeholder_type == "pic") and analysis.action == ConversionAction.CONVERT_EXISTING and not analysis.has_ph:
+                issues.append(
+                    Issue(
+                        issue_id=f"PH_MISSING_PIC_{slide.slide_number}_{analysis.shape_id}",
+                        rule_id=self.rule_id,
+                        rule_name=self.name,
+                        slide_number=slide.slide_number,
+                        severity=IssueSeverity.INFO,
+                        shape_id=analysis.shape_id,
+                        shape_name=analysis.shape_name,
+                        wcag_mapping=self.wcag_mapping,
+                        description=(
+                            f"Slide {slide.slide_number}: Standalone picture '{analysis.shape_name}' "
+                            f"lacks native placeholder semantics. Converting to native picture placeholder."
+                        ),
+                        recommendation="Convert standalone picture into a native slide picture placeholder.",
+                        behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+                        extra_data=extra_data
                     )
-                else:
-                    # Manual review
-                    issues.append(
-                        Issue(
-                            issue_id=f"PH_MANUAL_{slide.slide_number}_{analysis.shape_id}",
-                            rule_id=self.rule_id,
-                            rule_name=self.name,
-                            slide_number=slide.slide_number,
-                            severity=IssueSeverity.WARNING,
-                            shape_id=analysis.shape_id,
-                            shape_name=analysis.shape_name,
-                            wcag_mapping=self.wcag_mapping,
-                            description=f"Slide {slide.slide_number}: Placeholder '{analysis.shape_name}' requires manual review: {analysis.reason}",
-                            recommendation=analysis.recommendation,
-                            behavior=RuleBehavior.MANUAL_REVIEW,
-                            extra_data=extra_data
-                        )
+                )
+
+            # 5. Standalone table
+            elif (analysis.category == PlaceholderCategory.TABLE or analysis.proposed_placeholder_type == "tbl") and analysis.action == ConversionAction.CONVERT_EXISTING and not analysis.has_ph:
+                issues.append(
+                    Issue(
+                        issue_id=f"PH_MISSING_TBL_{slide.slide_number}_{analysis.shape_id}",
+                        rule_id=self.rule_id,
+                        rule_name=self.name,
+                        slide_number=slide.slide_number,
+                        severity=IssueSeverity.INFO,
+                        shape_id=analysis.shape_id,
+                        shape_name=analysis.shape_name,
+                        wcag_mapping=self.wcag_mapping,
+                        description=(
+                            f"Slide {slide.slide_number}: Standalone table '{analysis.shape_name}' "
+                            f"lacks native placeholder semantics. Converting to native table placeholder."
+                        ),
+                        recommendation="Convert standalone table into a native slide table placeholder.",
+                        behavior=RuleBehavior.SAFE_AUTO_REMEDIATE,
+                        extra_data=extra_data
                     )
+                )
 
             # 6. Preserved placeholders with manual review note (e.g. animated)
             elif analysis.status == PlaceholderStatus.MANUAL_REVIEW or analysis.action == ConversionAction.MANUAL_REVIEW:
