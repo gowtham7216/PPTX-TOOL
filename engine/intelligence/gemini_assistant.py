@@ -1282,27 +1282,35 @@ class GeminiAssistant:
 
                 # Font size bonus (if available)
                 max_sz = float(c.get("max_font_size_pt", 0.0))
-                if max_sz >= 24.0:
-                    score += 35.0
+                if max_sz >= 32.0:
+                    score += 55.0
+                elif max_sz >= 24.0:
+                    score += 40.0
                 elif max_sz >= 18.0:
                     score += 20.0
                 elif max_sz >= 14.0:
                     score += 10.0
+                elif 0 < max_sz <= 10.0:
+                    score -= 30.0
 
                 if c.get("is_bold"):
                     score += 10.0
 
                 # Placement bonus
-                if top_pt <= (slide_h * 0.15):
-                    score += 25.0
+                if top_pt <= (slide_h * 0.20):
+                    score += 30.0
                 elif top_pt <= (slide_h * 0.35):
+                    score += 25.0
+                elif top_pt <= (slide_h * 0.50):
                     score += 15.0
                 elif top_pt <= (slide_h * 0.70):
-                    score += 10.0
+                    score += 5.0
+                elif top_pt >= (slide_h * 0.88):
+                    score -= 80.0
 
                 # Title indicators
                 if re.search(r"Chapter\s+\d+", txt, re.IGNORECASE):
-                    score += 30.0
+                    score += 10.0
                 if ":" in txt:
                     score += 10.0
 

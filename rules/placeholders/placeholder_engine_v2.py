@@ -99,6 +99,117 @@ def mark_decorative(el: Any) -> None:
     cp_v2.mark_decorative(el)
 
 
+def normalize_content_placeholder_names(sp_tree: Any) -> List[Tuple[str, str]]:
+    """
+    Post-processing name normalization pass: ensure any content-type placeholder
+    has 'Placeholder' in its name. Returns list of (shape_id, new_name) renames.
+    """
+    renamed: List[Tuple[str, str]] = []
+    if sp_tree is None:
+        return renamed
+
+    for child in list(sp_tree):
+        if not has_ph(child):
+            continue
+        nv = get_nv_container(child)
+        if nv is None:
+            continue
+        nvpr = nv.find(qn("p", "nvPr"))
+        ph = nvpr.find(qn("p", "ph")) if nvpr is not None else None
+        if ph is None:
+            continue
+        ph_type = ph.get("type")
+        cnvpr = nv.find(qn("p", "cNvPr"))
+        if cnvpr is None:
+            continue
+        current_name = cnvpr.get("name", "")
+        shape_id = cnvpr.get("id", "")
+        idx = ph.get("idx", shape_id)
+
+        if ph_type in ("title", "ctrTitle"):
+            if "Title" not in current_name:
+                new_name = "Title 1"
+                cnvpr.set("name", new_name)
+                renamed.append((shape_id, new_name))
+        elif ph_type == "subTitle":
+            if "Subtitle" not in current_name:
+                new_name = f"Subtitle {idx}"
+                cnvpr.set("name", new_name)
+                renamed.append((shape_id, new_name))
+        elif ph_type in CONTENT_PH_TYPES:
+            if "Placeholder" not in current_name:
+                new_name = f"{CONTENT_PLACEHOLDER_LABEL} {idx}"
+                cnvpr.set("name", new_name)
+                renamed.append((shape_id, new_name))
+
+    return renamed
+
+
+def resolve_shape_font(sp_el: Any, primary_font: str = "Times New Roman", fallback_font: str = "Calibri") -> str:
+    """
+    Standardizes font to primary_font (Times New Roman) by default.
+    If applying primary_font causes contents to overflow the placeholder box, falls back to fallback_font (Calibri).
+    """
+    return cp_v2.resolve_shape_font(sp_el, primary_font=primary_font, fallback_font=fallback_font)
+
+
+def preserve_and_backfill_run_fonts(
+    sp_el: Any,
+    fallback_font: Optional[str] = None,
+    standardize_fonts: bool = True
+) -> str:
+    """
+    Standardizes font typeface according to design rules:
+    - Primary standard: Times New Roman
+    - Fallback standard: Calibri if text content overflows placeholder bounding box
+    - If standardize_fonts is False: preserves whichever font was originally applied.
+    """
+    if sp_el is None:
+        return ""
+
+    if standardize_fonts:
+        target_font = resolve_shape_font(sp_el, primary_font="Times New Roman", fallback_font="Calibri")
+    else:
+        # Detect shape-level dominant font
+        target_font = fallback_font
+        for p in sp_el.findall(f'.//{cp_v2.qn("a", "p")}'):
+            ppr = p.find(cp_v2.qn("a", "pPr"))
+            if ppr is not None:
+                def_rpr = ppr.find(cp_v2.qn("a", "defRPr"))
+                if def_rpr is not None:
+                    lat = def_rpr.find(cp_v2.qn("a", "latin"))
+                    if lat is not None and lat.get("typeface"):
+                        target_font = lat.get("typeface")
+                        break
+            for r in p.findall(cp_v2.qn("a", "r")):
+                rpr = r.find(cp_v2.qn("a", "rPr"))
+                if rpr is not None:
+                    lat = rpr.find(cp_v2.qn("a", "latin"))
+                    if lat is not None and lat.get("typeface"):
+                        target_font = lat.get("typeface")
+                        break
+            if target_font:
+                break
+        if not target_font:
+            target_font = "Times New Roman"
+
+    # Apply target font to all runs and paragraph ends
+    for p in sp_el.findall(f'.//{cp_v2.qn("a", "p")}'):
+        for r in p.findall(cp_v2.qn("a", "r")):
+            rpr = r.find(cp_v2.qn("a", "rPr"))
+            if rpr is None:
+                rpr = etree.Element(cp_v2.qn("a", "rPr"))
+                rpr.set("lang", "en-US")
+                r.insert(0, rpr)
+            cp_v2.set_latin_font(rpr, target_font)
+
+        end_rpr = p.find(cp_v2.qn("a", "endParaRPr"))
+        if end_rpr is not None:
+            cp_v2.set_latin_font(end_rpr, target_font)
+
+    return target_font
+
+
 @dataclass(frozen=True)
 class PlaceholderInsertionResult:
     inserted: bool
@@ -173,6 +284,7 @@ class PlaceholderEngineV2:
             if freeze_styles and tag in ("sp", "cxnSp"):
                 cp_v2.freeze_paragraph_properties(shape_elem)
                 cp_v2.backfill_run_sizes(shape_elem)
+                preserve_and_backfill_run_fonts(shape_elem)
             cp_v2.freeze_autofit(shape_elem)
             cp_v2.add_placeholder(shape_elem, placeholder_type, idx_val or "1")
             return PlaceholderInsertionResult(True, placeholder_type, idx_val, "placeholder-inserted")
@@ -182,6 +294,7 @@ class PlaceholderEngineV2:
                 cp_v2.freeze_paragraph_properties(shape_elem)
                 cp_v2.freeze_autofit(shape_elem)
                 cp_v2.backfill_run_sizes(shape_elem)
+                preserve_and_backfill_run_fonts(shape_elem)
             nv = cp_v2.get_nv_container(shape_elem)
             if nv is not None:
                 nvpr = nv.find(cp_v2.qn("p", "nvPr"))
@@ -190,6 +303,11 @@ class PlaceholderEngineV2:
                 if nvpr.find(cp_v2.qn("p", "ph")) is None:
                     ph = etree.Element(cp_v2.qn("p", "ph"), attrib={"type": placeholder_type})
                     nvpr.insert(0, ph)
+                cnvpr = nv.find(cp_v2.qn("p", "cNvPr"))
+                if cnvpr is not None:
+                    curr_name = cnvpr.get("name", "")
+                    if "Title" not in curr_name:
+                        cnvpr.set("name", "Title 1")
             return PlaceholderInsertionResult(True, placeholder_type, None, "placeholder-inserted")
 
         elif placeholder_type == "subTitle":
@@ -197,6 +315,7 @@ class PlaceholderEngineV2:
                 cp_v2.freeze_paragraph_properties(shape_elem)
                 cp_v2.freeze_autofit(shape_elem)
                 cp_v2.backfill_run_sizes(shape_elem)
+                preserve_and_backfill_run_fonts(shape_elem)
             nv = cp_v2.get_nv_container(shape_elem)
             if nv is not None:
                 nvpr = nv.find(cp_v2.qn("p", "nvPr"))
@@ -205,6 +324,11 @@ class PlaceholderEngineV2:
                 if nvpr.find(cp_v2.qn("p", "ph")) is None:
                     ph = etree.Element(cp_v2.qn("p", "ph"), attrib={"type": "subTitle", "idx": str(idx_val or "1")})
                     nvpr.insert(0, ph)
+                cnvpr = nv.find(cp_v2.qn("p", "cNvPr"))
+                if cnvpr is not None:
+                    curr_name = cnvpr.get("name", "")
+                    if "Subtitle" not in curr_name:
+                        cnvpr.set("name", f"Subtitle {idx_val or '1'}")
             return PlaceholderInsertionResult(True, placeholder_type, idx_val, "placeholder-inserted")
 
         return PlaceholderInsertionResult(False, placeholder_type, None, "unsupported-type")

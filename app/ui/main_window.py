@@ -294,6 +294,7 @@ class SlideGuardMainWindow:
         self.ro_affected_meta_var = tk.StringVar(value="🗂 0 affected slides")
         self.ro_slides_meta_var = tk.StringVar(value="📄 0 slides")
         self.ph_eligible_meta_var = tk.StringVar(value="🗂 0 eligible items")
+        self.skip_empty_text_var = tk.BooleanVar(value=False)
 
         # User Approval Gate
         self.approval_var = tk.BooleanVar(value=True)
@@ -1094,6 +1095,9 @@ class SlideGuardMainWindow:
             action_text="Convert Placeholders",
             action_cmd=self._on_apply_placeholders_clicked,
             inspect_cmd=lambda: self.review_notebook.select(3),
+            checkbox_var=self.skip_empty_text_var,
+            checkbox_text="Skip empty shapes (no text)",
+            checkbox_cmd=self._on_skip_empty_toggled,
         )
 
         # Card 3: Validate & Compare
@@ -1165,7 +1169,10 @@ class SlideGuardMainWindow:
         meta_var: tk.StringVar,
         action_text: str,
         action_cmd: Any,
-        inspect_cmd: Any
+        inspect_cmd: Any,
+        checkbox_var: Optional[tk.BooleanVar] = None,
+        checkbox_text: str = "",
+        checkbox_cmd: Optional[Any] = None,
     ):
         card = tk.Frame(parent, bg=BG_WHITE, highlightbackground=BORDER_SUBTLE, highlightthickness=1)
         card.grid(row=0, column=col_idx, sticky="nsew", padx=4)
@@ -1187,7 +1194,25 @@ class SlideGuardMainWindow:
         desc_lbl.pack(anchor=tk.W, pady=(0, 8))
 
         # Footer Meta
-        tk.Label(in_c, textvariable=meta_var, font=("Segoe UI", 8), fg=TEXT_SECONDARY, bg=BG_WHITE).pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(in_c, textvariable=meta_var, font=("Segoe UI", 8), fg=TEXT_SECONDARY, bg=BG_WHITE).pack(anchor=tk.W, pady=(0, 4 if checkbox_var else 10))
+
+        # Optional Checkbox option
+        if checkbox_var is not None:
+            cb = tk.Checkbutton(
+                in_c,
+                text=checkbox_text,
+                variable=checkbox_var,
+                command=checkbox_cmd,
+                font=("Segoe UI", 8),
+                fg=TEXT_PRIMARY,
+                bg=BG_WHITE,
+                activebackground=BG_WHITE,
+                selectcolor=BG_WHITE,
+                cursor="hand2",
+                wraplength=210,
+                justify=tk.LEFT,
+            )
+            cb.pack(anchor=tk.W, pady=(0, 8))
 
         # Action Button
         btn = tk.Button(
@@ -1383,11 +1408,13 @@ class SlideGuardMainWindow:
 
             self.job_context = self.controller.initialize_job(path)
             total = self.job_context.total_slides
+            fonts = getattr(self.job_context, "detected_fonts", [])
+            fonts_str = ", ".join(fonts[:2]) if fonts else "Original Presentation Fonts"
             self.file_label_var.set(f"{path.name}  •  {total} Slides")
-            self.file_meta_var.set(f"Loaded: {path.name}  |  Location: {path.parent}")
+            self.file_meta_var.set(f"Typography: {fonts_str} (Preserved)  |  Location: {path.parent}")
 
-            self._add_activity_event("blue", f"Loaded {path.name} ({total} slides)")
-            self._log_remediation_event(f"Initialized job {self.job_context.job_id} for {path.name} ({total} slides).")
+            self._add_activity_event("blue", f"Loaded {path.name} ({total} slides, fonts: {fonts_str})")
+            self._log_remediation_event(f"Initialized job {self.job_context.job_id} for {path.name} ({total} slides). Detected fonts: {fonts_str}.")
 
             # Launch automatic analysis
             self._on_analyze_clicked()
@@ -1432,6 +1459,11 @@ class SlideGuardMainWindow:
         self.is_busy = False
         ctx = self.job_context
         m = ctx.metrics
+
+        # Refresh Typography Pill
+        fonts = getattr(ctx, "detected_fonts", [])
+        fonts_str = ", ".join(fonts[:2]) if fonts else "Original Presentation Fonts"
+        self.file_meta_var.set(f"Typography: {fonts_str} (Preserved)  |  Location: {ctx.original_file.parent}")
 
         # Update Score Card
         score_val = m.accessibility_score
@@ -1765,6 +1797,23 @@ class SlideGuardMainWindow:
 
         self._populate_reports_tab()
 
+    def _on_skip_empty_toggled(self):
+        """Updates the candidate eligible counter dynamically when the skip_empty checkbox is toggled."""
+        if not self.job_context:
+            return
+        skip = self.skip_empty_text_var.get()
+        ph_issues = [i for res in self.job_context.rule_results if res.rule_id == "SG-PH-01" for i in res.issues]
+        if skip:
+            non_empty_count = sum(
+                1 for i in ph_issues
+                if i.extra_data.get("is_picture") or i.extra_data.get("is_table") or (
+                    i.extra_data.get("has_text") and not i.extra_data.get("is_empty") and (i.extra_data.get("text_preview") or "").strip()
+                )
+            )
+            self.ph_eligible_meta_var.set(f"🗂 {non_empty_count} eligible (empty skipped)")
+        else:
+            self.ph_eligible_meta_var.set(f"🗂 {len(ph_issues)} eligible items")
+
     def _on_apply_placeholders_clicked(self):
         """Converts eligible floating text/shapes into native layout placeholders."""
         if getattr(self, "is_busy", False):
@@ -1794,9 +1843,11 @@ class SlideGuardMainWindow:
                     pct = int((curr / max(1, total)) * 100)
                     self.root.after(0, lambda: self._update_progress(pct, msg))
 
+                skip_empty = bool(self.skip_empty_text_var.get())
                 self.job_context = self.controller.execute_placeholder_remediation(
                     self.job_context,
-                    progress_callback=_progress
+                    progress_callback=_progress,
+                    skip_empty_text=skip_empty
                 )
                 self.root.after(0, self._on_placeholders_finished)
             except Exception as e:

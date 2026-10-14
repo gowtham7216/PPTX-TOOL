@@ -26,7 +26,10 @@ from rules.placeholders.classifier import (
     _safe_xpath,
     NSMAP,
 )
-from rules.placeholders.placeholder_engine_v2 import PlaceholderEngineV2
+from rules.placeholders.placeholder_engine_v2 import (
+    PlaceholderEngineV2,
+    preserve_and_backfill_run_fonts,
+)
 
 try:
     import ConvertPlaceholder_v2 as cp_v2
@@ -83,7 +86,8 @@ class PlaceholderTransformer:
         slide_number: int,
         raw_slide=None,
         animation_target_ids: Optional[List[int]] = None,
-        approved_shape_ids: Optional[List[int]] = None
+        approved_shape_ids: Optional[List[int]] = None,
+        skip_empty_text: bool = False
     ) -> ConversionResult:
         """
         Processes and remediates placeholders on a single slide.
@@ -109,9 +113,10 @@ class PlaceholderTransformer:
 
         # 2. Analyze all placeholders and candidate shapes on slide
         analyses = self.classifier.analyze_slide_placeholders(
-            raw_slide=raw_slide,
+            raw_slide=raw_slide or slide_elem,
             slide_number=slide_number,
-            animation_target_ids=list(anim_targets)
+            animation_target_ids=list(anim_targets),
+            skip_empty_text=skip_empty_text
         )
         result.total_placeholders_analyzed = len(analyses)
 
@@ -151,13 +156,16 @@ class PlaceholderTransformer:
             # Safe to convert: execute deterministic transformation
             if analysis.action in (ConversionAction.CONVERT_EXISTING, ConversionAction.CREATE_NEW) or analysis.status == PlaceholderStatus.SAFE_TO_CONVERT:
                 try:
-                    created_id = self._execute_conversion(analysis, sp_tree, raw_slide=raw_slide)
+                    created_id = self._execute_conversion(analysis, sp_tree, raw_slide=raw_slide, skip_empty_text=skip_empty_text)
                     if analysis.action == ConversionAction.CREATE_NEW and created_id:
                         result.created_shape_ids.append(created_id)
                         result.placeholders_converted += 1
-                    else:
+                    elif created_id is not None or (created_id is None and not (skip_empty_text and analysis.raw_element is not None and not cp_v2.shape_text(analysis.raw_element))):
                         result.placeholders_converted += 1
                         result.converted_shape_ids.append(shape_id)
+                    else:
+                        result.placeholders_preserved += 1
+                        result.preserved_shape_ids.append(shape_id)
                     logger.info("Successfully converted Shape %d on Slide %d", shape_id, slide_number)
                 except Exception as e:
                     logger.error("Failed to convert Shape %d on Slide %d: %s", shape_id, slide_number, e, exc_info=True)
@@ -206,7 +214,8 @@ class PlaceholderTransformer:
         self,
         analysis: PlaceholderAnalysis,
         sp_tree,
-        raw_slide=None
+        raw_slide=None,
+        skip_empty_text: bool = False
     ) -> Optional[int]:
         """
         Executes physical XML mutation for an individual approved shape using ConvertPlaceholder_v2 logic.
@@ -214,6 +223,11 @@ class PlaceholderTransformer:
         shape_elem = analysis.raw_element
         if shape_elem is None:
             raise ValueError(f"Shape {analysis.shape_id} raw_element is None.")
+
+        # Check if empty text shape should be skipped
+        if skip_empty_text and not cp_v2.shape_text(shape_elem):
+            logger.info("Preserving empty shape %d as requested by user.", analysis.shape_id)
+            return None
 
         # Check if already a placeholder or marked decorative
         if cp_v2.has_ph(shape_elem):
@@ -262,6 +276,7 @@ class PlaceholderTransformer:
             if target_type == "body" and tag == "sp":
                 cp_v2.freeze_paragraph_properties(shape_elem)
                 cp_v2.backfill_run_sizes(shape_elem)
+                preserve_and_backfill_run_fonts(shape_elem)
             cp_v2.freeze_autofit(shape_elem)
             cp_v2.add_placeholder(shape_elem, target_type, idx_val)
             return None
@@ -271,6 +286,7 @@ class PlaceholderTransformer:
                 cp_v2.freeze_paragraph_properties(shape_elem)
                 cp_v2.freeze_autofit(shape_elem)
                 cp_v2.backfill_run_sizes(shape_elem)
+                preserve_and_backfill_run_fonts(shape_elem)
             nv = cp_v2.get_nv_container(shape_elem)
             if nv is not None:
                 nvpr = nv.find(cp_v2.qn("p", "nvPr"))
@@ -279,6 +295,11 @@ class PlaceholderTransformer:
                 if nvpr.find(cp_v2.qn("p", "ph")) is None:
                     ph = etree.Element(cp_v2.qn("p", "ph"), attrib={"type": target_type})
                     nvpr.insert(0, ph)
+                cnvpr = nv.find(cp_v2.qn("p", "cNvPr"))
+                if cnvpr is not None:
+                    curr_name = cnvpr.get("name", "")
+                    if "Title" not in curr_name:
+                        cnvpr.set("name", "Title 1")
             return None
 
         elif target_type == "subtitle":
@@ -286,6 +307,7 @@ class PlaceholderTransformer:
                 cp_v2.freeze_paragraph_properties(shape_elem)
                 cp_v2.freeze_autofit(shape_elem)
                 cp_v2.backfill_run_sizes(shape_elem)
+                preserve_and_backfill_run_fonts(shape_elem)
             nv = cp_v2.get_nv_container(shape_elem)
             if nv is not None:
                 nvpr = nv.find(cp_v2.qn("p", "nvPr"))
@@ -294,6 +316,11 @@ class PlaceholderTransformer:
                 if nvpr.find(cp_v2.qn("p", "ph")) is None:
                     ph = etree.Element(cp_v2.qn("p", "ph"), attrib={"type": "subTitle", "idx": str(idx_val)})
                     nvpr.insert(0, ph)
+                cnvpr = nv.find(cp_v2.qn("p", "cNvPr"))
+                if cnvpr is not None:
+                    curr_name = cnvpr.get("name", "")
+                    if "Subtitle" not in curr_name:
+                        cnvpr.set("name", f"Subtitle {idx_val}")
             return None
 
         elif target_type == "decorative":

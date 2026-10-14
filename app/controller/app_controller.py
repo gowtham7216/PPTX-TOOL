@@ -49,6 +49,19 @@ class AppController:
         self.reporter = reporter or ReportGenerator()
         self.current_presentation = None
 
+    def detect_presentation_fonts(self, presentation: Optional[Any]) -> List[str]:
+        """Scans all slides, shapes, and runs to detect original fonts used in presentation."""
+        detected = set()
+        if not presentation:
+            return []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                for para in shape.paragraphs:
+                    for run in para.runs:
+                        if run.font_name:
+                            detected.add(run.font_name.strip())
+        return sorted(list(detected))
+
     def initialize_job(self, file_path: Path) -> JobContext:
         """Sets up sandboxed workspace and creates an isolated working copy."""
         logger.info("Initializing job for %s", file_path)
@@ -58,6 +71,7 @@ class AppController:
         self.current_presentation = self.reader.read(context.working_file)
         context.total_slides = self.current_presentation.total_slides
         context.slides_analyzed = 0
+        context.detected_fonts = self.detect_presentation_fonts(self.current_presentation)
         return context
 
     def execute_analysis(
@@ -68,6 +82,7 @@ class AppController:
         """Executes full rule-based accessibility analysis."""
         if self.current_presentation is None:
             self.current_presentation = self.reader.read(context.working_file)
+        context.detected_fonts = self.detect_presentation_fonts(self.current_presentation)
 
         context.stage = JobStage.ANALYZING
         rule_results = self.analyzer.analyze(
@@ -140,7 +155,8 @@ class AppController:
     def execute_remediation(
         self,
         context: JobContext,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        skip_empty_text: bool = False
     ) -> JobContext:
         """
         Executes remediation on candidate working copy.
@@ -156,7 +172,8 @@ class AppController:
         actions = self.remediator.remediate(
             context,
             self.current_presentation,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            skip_empty_text=skip_empty_text
         )
         context.remediation_actions = actions
         return self._finalize_candidate_and_export(context)
@@ -185,7 +202,8 @@ class AppController:
     def execute_placeholder_remediation(
         self,
         context: JobContext,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        skip_empty_text: bool = False
     ) -> JobContext:
         """Executes independent native placeholder conversion and saves candidate copy."""
         if not context.user_approved_remediation:
@@ -200,7 +218,7 @@ class AppController:
         if progress_callback:
             progress_callback(1, 2, "Converting shapes to native placeholders...")
 
-        self.remediator.remediate_placeholders(context, self.current_presentation)
+        self.remediator.remediate_placeholders(context, self.current_presentation, skip_empty_text=skip_empty_text)
         return self._finalize_candidate_and_export(context)
 
     def execute_alt_text_remediation(

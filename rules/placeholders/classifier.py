@@ -153,8 +153,10 @@ def score_title_candidate(cand: Dict[str, Any], slide_h: float, slide_w: float) 
 
     # Typography (max font size and bold)
     max_sz = cand.get("max_font_size", 0.0)
-    if max_sz >= 24.0:
-        score += 35.0
+    if max_sz >= 32.0:
+        score += 55.0
+    elif max_sz >= 24.0:
+        score += 40.0
     elif max_sz >= 18.0:
         score += 20.0
     elif max_sz >= 14.0:
@@ -168,18 +170,20 @@ def score_title_candidate(cand: Dict[str, Any], slide_h: float, slide_w: float) 
     # Placement bonus (evaluates entire slide, with higher scores near top)
     bbox = cand.get("bbox_pt", (0.0, 0.0, 0.0, 0.0))
     top_pt = bbox[1]
-    if top_pt <= (slide_h * 0.15):
-        score += 25.0
+    if top_pt <= (slide_h * 0.20):
+        score += 30.0
     elif top_pt <= (slide_h * 0.35):
+        score += 25.0
+    elif top_pt <= (slide_h * 0.50):
         score += 15.0
     elif top_pt <= (slide_h * 0.70):
-        score += 10.0
+        score += 5.0
     elif top_pt >= (slide_h * 0.88):
         score -= 80.0
 
     # Keywords & Patterns
     if re.search(r"Chapter\s+\d+", t, re.IGNORECASE):
-        score += 30.0
+        score += 10.0
     if ":" in t:
         score += 10.0
 
@@ -304,7 +308,8 @@ class PlaceholderClassifier:
         animation_target_ids: Optional[List[int]] = None,
         slide_height_pt: float = 540.0,
         slide_width_pt: float = 720.0,
-        include_all_shapes: bool = False
+        include_all_shapes: bool = False,
+        skip_empty_text: bool = False
     ) -> List[PlaceholderAnalysis]:
         """
         Analyzes all placeholders and candidate shapes on a slide using
@@ -326,7 +331,7 @@ class PlaceholderClassifier:
         sp_trees = _safe_xpath(slide_elem, ".//p:spTree")
         sptree_elem = sp_trees[0] if sp_trees else slide_elem
         try:
-            v2_classification, _, _ = cp_v2.classify_slide_shapes(sptree_elem, skip_empty_text=False)
+            v2_classification, _, _ = cp_v2.classify_slide_shapes(sptree_elem, skip_empty_text=skip_empty_text)
         except Exception as e:
             logger.warning("ConvertPlaceholder_v2 classification failed: %s; falling back to empty classification.", e)
             v2_classification = {}
@@ -589,7 +594,7 @@ class PlaceholderClassifier:
 
         # Subtitle promotion evaluation
         promoted_subtitle_shape_id: Optional[int] = None
-        if effective_title_id is not None and not has_slide_subtitle and layout_has_subtitle:
+        if effective_title_id is not None and not has_slide_subtitle and (layout_has_subtitle or slide_number == 1):
             subtitle_candidates = []
             for c in candidates_raw:
                 sid = c["shape_id"]
@@ -612,7 +617,7 @@ class PlaceholderClassifier:
                     continue
 
                 sub_score = 15.0
-                if layout_has_subtitle:
+                if layout_has_subtitle or slide_number == 1:
                     sub_score += 30.0
                 if c["is_bold"]:
                     sub_score += 10.0

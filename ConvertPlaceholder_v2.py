@@ -315,9 +315,148 @@ def freeze_autofit(el):
 
 
 TIMES_NEW_ROMAN = 'Times New Roman'
+CALIBRI = 'Calibri'
 TITLE_SZ = '4000'
 BODY_SZ_MIN = 1800
 BODY_SZ_MAX = 2600
+
+_FONT_CACHE = {}
+
+
+def get_font_object(font_name: str, size_pt: float):
+    cache_key = (font_name, int(round(size_pt)))
+    if cache_key in _FONT_CACHE:
+        return _FONT_CACHE[cache_key]
+
+    font = None
+    try:
+        from PIL import ImageFont
+        font_file = 'times.ttf' if 'times' in font_name.lower() else 'calibri.ttf'
+        try:
+            font = ImageFont.truetype(font_file, int(round(size_pt)))
+        except Exception:
+            windir = os.environ.get('WINDIR', r'C:\Windows')
+            full_path = os.path.join(windir, 'Fonts', font_file)
+            if os.path.exists(full_path):
+                font = ImageFont.truetype(full_path, int(round(size_pt)))
+    except Exception:
+        font = None
+
+    _FONT_CACHE[cache_key] = font
+    return font
+
+
+def check_text_overflow(sp_el, target_font: str = 'Times New Roman') -> bool:
+    xfrm = sp_el.find(f'.//{qn("a", "xfrm")}')
+    if xfrm is None:
+        return False
+    ext = xfrm.find(qn('a', 'ext'))
+    if ext is None:
+        return False
+
+    cx = int(ext.get('cx', '0'))
+    cy = int(ext.get('cy', '0'))
+    if cx <= 0 or cy <= 0:
+        return False
+
+    w_pt = cx / 12700.0
+    h_pt = cy / 12700.0
+
+    bodypr = sp_el.find(f'.//{qn("a", "bodyPr")}')
+    l_ins = int(bodypr.get('lIns', '91440')) / 12700.0 if bodypr is not None and bodypr.get('lIns') is not None else 7.2
+    r_ins = int(bodypr.get('rIns', '91440')) / 12700.0 if bodypr is not None and bodypr.get('rIns') is not None else 7.2
+    t_ins = int(bodypr.get('tIns', '45720')) / 12700.0 if bodypr is not None and bodypr.get('tIns') is not None else 3.6
+    b_ins = int(bodypr.get('bIns', '45720')) / 12700.0 if bodypr is not None and bodypr.get('bIns') is not None else 3.6
+    wrap_mode = bodypr.get('wrap', 'square') if bodypr is not None else 'square'
+
+    avail_w = max(1.0, w_pt - (l_ins + r_ins))
+    avail_h = max(1.0, h_pt - (t_ins + b_ins))
+
+    total_h = 0.0
+
+    paragraphs = sp_el.findall(f'.//{qn("a", "p")}')
+    for p in paragraphs:
+        p_text = ''.join(t.text for t in p.findall(f'.//{qn("a", "t")}') if t.text).strip()
+        if not p_text:
+            continue
+
+        sz_val = None
+        for r in p.findall(qn('a', 'r')):
+            rpr = r.find(qn('a', 'rPr'))
+            if rpr is not None and rpr.get('sz'):
+                sz_val = rpr.get('sz')
+                break
+        if not sz_val:
+            defrpr = p.find(f'.//{qn("a", "defRPr")}')
+            if defrpr is not None and defrpr.get('sz'):
+                sz_val = defrpr.get('sz')
+        sz_pt = int(sz_val) / 100.0 if sz_val else 18.0
+
+        ppr = p.find(qn('a', 'pPr'))
+        mar_l = int(ppr.get('marL', '0')) / 12700.0 if ppr is not None and ppr.get('marL') is not None else 0.0
+        mar_r = int(ppr.get('marR', '0')) / 12700.0 if ppr is not None and ppr.get('marR') is not None else 0.0
+        p_avail_w = max(1.0, avail_w - (mar_l + mar_r))
+
+        font_obj = get_font_object(target_font, sz_pt)
+
+        if font_obj is not None:
+            ascent, descent = font_obj.getmetrics()
+            line_h = (ascent + descent) * 1.15
+            if wrap_mode == 'none':
+                bbox = font_obj.getbbox(p_text)
+                if (bbox[2] - bbox[0]) > p_avail_w:
+                    return True
+                num_lines = 1
+            else:
+                words = p_text.split()
+                lines = []
+                curr_line = ''
+                for w in words:
+                    cand = f'{curr_line} {w}'.strip()
+                    bbox = font_obj.getbbox(cand)
+                    cand_w = bbox[2] - bbox[0]
+                    if cand_w <= p_avail_w:
+                        curr_line = cand
+                    else:
+                        if curr_line:
+                            lines.append(curr_line)
+                        w_bbox = font_obj.getbbox(w)
+                        if (w_bbox[2] - w_bbox[0]) > p_avail_w:
+                            return True
+                        curr_line = w
+                if curr_line:
+                    lines.append(curr_line)
+                num_lines = max(1, len(lines))
+        else:
+            char_w = sz_pt * (0.50 if 'times' in target_font.lower() else 0.46)
+            line_h = sz_pt * (1.25 if 'times' in target_font.lower() else 1.15)
+            if wrap_mode == 'none':
+                if (len(p_text) * char_w) > p_avail_w:
+                    return True
+                num_lines = 1
+            else:
+                chars_per_line = max(1, int(p_avail_w / char_w))
+                for w in p_text.split():
+                    if len(w) > chars_per_line:
+                        return True
+                num_lines = max(1, (len(p_text) + chars_per_line - 1) // chars_per_line)
+
+        total_h += (num_lines * line_h)
+
+    if total_h > (avail_h * 1.02):
+        return True
+
+    return False
+
+
+def resolve_shape_font(sp_el, primary_font: str = TIMES_NEW_ROMAN, fallback_font: str = CALIBRI) -> str:
+    """
+    Standardizes font to primary_font (Times New Roman) by default.
+    If applying primary_font causes contents to overflow the placeholder box, falls back to fallback_font (Calibri).
+    """
+    if check_text_overflow(sp_el, target_font=primary_font):
+        return fallback_font
+    return primary_font
 
 
 def set_latin_font(rpr, typeface):
@@ -353,6 +492,7 @@ def reset_autofit_scale(sp_el):
 
 
 def apply_font_and_size_rules(sp_el, is_title):
+    chosen_font = resolve_shape_font(sp_el, primary_font=TIMES_NEW_ROMAN, fallback_font=CALIBRI)
     for p in sp_el.findall(f'.//{qn("a","p")}'):
         for r in p.findall(qn('a', 'r')):
             rpr = r.find(qn('a', 'rPr'))
@@ -360,11 +500,11 @@ def apply_font_and_size_rules(sp_el, is_title):
                 rpr = etree.Element(qn('a', 'rPr'))
                 rpr.set('lang', 'en-US')
                 r.insert(0, rpr)
-            set_latin_font(rpr, TIMES_NEW_ROMAN)
+            set_latin_font(rpr, chosen_font)
 
         end_rpr = p.find(qn('a', 'endParaRPr'))
         if end_rpr is not None:
-            set_latin_font(end_rpr, TIMES_NEW_ROMAN)
+            set_latin_font(end_rpr, chosen_font)
 
 
 # --------------------------------------------------------------------------

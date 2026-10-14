@@ -177,3 +177,103 @@ def test_normalize_content_placeholder_names():
     assert sh1.xpath(".//p:cNvPr/@name", namespaces=NS)[0] == "Content Placeholder 4"
     assert sh2.xpath(".//p:cNvPr/@name", namespaces=NS)[0] == "Slide Title"
     assert sh3.xpath(".//p:cNvPr/@name", namespaces=NS)[0] == "Content Placeholder 5"
+
+
+def make_empty_shape(shape_id=99, name=None):
+    sp = etree.Element(f"{{{P}}}sp", nsmap={"p": P, "a": A})
+    nv = etree.SubElement(sp, f"{{{P}}}nvSpPr")
+    shape_name = name or f"Shape {shape_id}"
+    etree.SubElement(nv, f"{{{P}}}cNvPr", id=str(shape_id), name=shape_name)
+    etree.SubElement(nv, f"{{{P}}}cNvSpPr")
+    etree.SubElement(nv, f"{{{P}}}nvPr")
+    sppr = etree.SubElement(sp, f"{{{P}}}spPr")
+    xfrm = etree.SubElement(sppr, f"{{{A}}}xfrm")
+    etree.SubElement(xfrm, f"{{{A}}}off", x="10", y="20")
+    etree.SubElement(xfrm, f"{{{A}}}ext", cx="30", cy="40")
+    return sp
+
+
+def test_skip_empty_text_shapes_leaves_empty_shapes_unconverted():
+    from pptx import Presentation
+    from rules.placeholders.transformer import PlaceholderTransformer
+    transformer = PlaceholderTransformer()
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    empty_shape = make_empty_shape(88, "Empty Background Tile")
+    text_shape = make_shape(89, name="Real Content Card")
+    slide.shapes._spTree.append(empty_shape)
+    slide.shapes._spTree.append(text_shape)
+
+    # When skip_empty_text=True: empty shape preserved untouched without <p:ph>, content shape converted
+    res = transformer.convert_slide(slide._element, slide_number=1, raw_slide=slide, skip_empty_text=True)
+    assert res.success is True
+    assert 88 not in res.converted_shape_ids
+    assert len(empty_shape.xpath(".//p:ph", namespaces=NS)) == 0
+    assert 89 in res.converted_shape_ids
+    assert len(text_shape.xpath(".//p:ph", namespaces=NS)) == 1
+
+
+def test_font_preservation_across_shapes_and_remediation():
+    """Validates that fonts standardize to Times New Roman by default, and fall back to Calibri upon content overflow."""
+    from pptx import Presentation
+    from rules.placeholders.transformer import PlaceholderTransformer
+    transformer = PlaceholderTransformer()
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    
+    # Create shape 101 with ample box (470pt x 118pt) -> Times New Roman fits
+    tnr_shape = make_shape(101, name="TNR Box")
+    ext1 = tnr_shape.xpath(".//a:ext", namespaces=NS)[0]
+    ext1.set("cx", "6000000")
+    ext1.set("cy", "1500000")
+    r1 = tnr_shape.xpath(".//a:r", namespaces=NS)[0]
+    rpr1 = etree.Element(f"{{{A}}}rPr")
+    lat1 = etree.SubElement(rpr1, f"{{{A}}}latin")
+    lat1.set("typeface", "Arial")  # Original font is Arial
+    r1.insert(0, rpr1)
+    
+    # Create shape 102 with tight box (100pt x 25pt) and multi-line text -> Times New Roman overflows -> falls back to Calibri
+    cal_shape = make_shape(102, name="Calibri Box")
+    ext2 = cal_shape.xpath(".//a:ext", namespaces=NS)[0]
+    ext2.set("cx", "1270000")
+    ext2.set("cy", "320000")
+    tx2 = cal_shape.xpath(".//a:t", namespaces=NS)[0]
+    tx2.text = "This is a longer paragraph that requires several lines of text to render inside a tight bounding box."
+    r2 = cal_shape.xpath(".//a:r", namespaces=NS)[0]
+    rpr2 = etree.Element(f"{{{A}}}rPr")
+    lat2 = etree.SubElement(rpr2, f"{{{A}}}latin")
+    lat2.set("typeface", "Figtree")  # Original font is Figtree
+    r2.insert(0, rpr2)
+    
+    slide.shapes._spTree.append(tnr_shape)
+    slide.shapes._spTree.append(cal_shape)
+    res = transformer.convert_slide(slide._element, slide_number=1, raw_slide=slide)
+    assert res.success is True
+    assert 101 in res.converted_shape_ids
+    assert 102 in res.converted_shape_ids
+    
+    # Verify Times New Roman selected for shape 101 (fits box)
+    tnr_fonts = tnr_shape.xpath(".//a:latin/@typeface", namespaces=NS)
+    assert "Times New Roman" in tnr_fonts
+    
+    # Verify Calibri selected for shape 102 (overflow fallback)
+    cal_fonts = cal_shape.xpath(".//a:latin/@typeface", namespaces=NS)
+    assert "Calibri" in cal_fonts
+
+
+def test_font_preservation_mode():
+    """Validates that when standardize_fonts=False, the original font is strictly preserved."""
+    from rules.placeholders.placeholder_engine_v2 import preserve_and_backfill_run_fonts
+    
+    shape = make_shape(103, name="Preserve Shape")
+    r = shape.xpath(".//a:r", namespaces=NS)[0]
+    rpr = etree.Element(f"{{{A}}}rPr")
+    lat = etree.SubElement(rpr, f"{{{A}}}latin")
+    lat.set("typeface", "Courier New")
+    r.insert(0, rpr)
+    
+    applied = preserve_and_backfill_run_fonts(shape, standardize_fonts=False)
+    assert applied == "Courier New"
+    fonts = shape.xpath(".//a:latin/@typeface", namespaces=NS)
+    assert "Courier New" in fonts
+

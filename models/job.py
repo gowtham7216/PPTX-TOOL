@@ -109,6 +109,8 @@ class JobContext:
     qa_result: Optional[Any] = None
     # Task 4 Comprehensive Placeholder Audit Report
     task_4_placeholder_report: Optional[Dict[str, Any]] = None
+    # Detected Typography / Font typefaces in presentation
+    detected_fonts: List[str] = field(default_factory=list)
 
     @property
     def duration_seconds(self) -> float:

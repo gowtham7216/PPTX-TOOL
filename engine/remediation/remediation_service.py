@@ -76,7 +76,8 @@ class RemediationService:
         self,
         context: JobContext,
         presentation: PresentationModel,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        skip_empty_text: bool = False
     ) -> List[RemediationAction]:
         if not context.user_approved_remediation:
             raise PermissionError("Remediation cannot proceed without explicit user approval.")
@@ -136,7 +137,7 @@ class RemediationService:
             progress_callback(3, total_steps, "Executing STEP 3: Native Placeholder Conversion...")
 
         logger.info("Executing STEP 3: Native Placeholder Conversion")
-        ph_actions = self._execute_placeholder_step(context, presentation)
+        ph_actions = self._execute_placeholder_step(context, presentation, skip_empty_text=skip_empty_text)
         converted_count = sum(1 for a in ph_actions if a.status == RemediationStatus.APPLIED)
 
         step_3_action = RemediationAction(
@@ -363,7 +364,8 @@ class RemediationService:
     def remediate_placeholders(
         self,
         context: JobContext,
-        presentation: PresentationModel
+        presentation: PresentationModel,
+        skip_empty_text: bool = False
     ) -> List[RemediationAction]:
         """Executes independent native placeholder conversion and saves candidate copy."""
         if not context.user_approved_remediation:
@@ -371,7 +373,7 @@ class RemediationService:
 
         context.stage = JobStage.REMEDIATING
         logger.info("Executing independent Placeholder Conversion remediation for job %s", context.job_id)
-        ph_actions = self._execute_placeholder_step(context, presentation)
+        ph_actions = self._execute_placeholder_step(context, presentation, skip_empty_text=skip_empty_text)
         converted_count = sum(1 for a in ph_actions if a.status == RemediationStatus.APPLIED)
 
         step_3_action = RemediationAction(
@@ -657,7 +659,8 @@ class RemediationService:
     def _execute_placeholder_step(
         self,
         context: JobContext,
-        presentation: PresentationModel
+        presentation: PresentationModel,
+        skip_empty_text: bool = False
     ) -> List[RemediationAction]:
         """Runs Placeholder conversion remediation across all slides with issues."""
         step_actions = []
@@ -681,7 +684,7 @@ class RemediationService:
         if not has_ph_evaluation and presentation.slides:
             logger.info("No prior placeholder rule results found; evaluating slides on the fly.")
             for slide in presentation.slides:
-                issues = self.ph_rule.evaluate(slide, presentation)
+                issues = self.ph_rule.evaluate(slide, presentation, skip_empty_text=skip_empty_text)
                 for issue in issues:
                     ph_issues_by_slide.setdefault(issue.slide_number, []).append(issue)
 
@@ -690,7 +693,27 @@ class RemediationService:
         for slide in presentation.slides:
             if slide.slide_number in ph_issues_by_slide:
                 for issue in ph_issues_by_slide[slide.slide_number]:
-                    action = self.ph_rule.remediate_issue(slide, presentation, issue)
+                    # If skip_empty_text is True and this is an empty text shape, skip it
+                    is_pic = issue.extra_data.get("is_picture", False)
+                    is_tbl = issue.extra_data.get("is_table", False)
+                    has_text = issue.extra_data.get("has_text", False)
+                    is_empty = issue.extra_data.get("is_empty", False)
+                    text_prev = (issue.extra_data.get("text_preview") or "").strip()
+                    if skip_empty_text and not is_pic and not is_tbl and (not has_text or is_empty or not text_prev):
+                        step_actions.append(
+                            RemediationAction(
+                                action_id=f"rem_ph_skip_empty_{slide.slide_number}_{issue.shape_id}",
+                                rule_id=self.ph_rule.rule_id,
+                                slide_number=slide.slide_number,
+                                description=f"Preserved Shape {issue.shape_id}: Skipped empty shape (no text).",
+                                status=RemediationStatus.SKIPPED,
+                                confidence=1.0,
+                                is_user_approved=True
+                            )
+                        )
+                        continue
+
+                    action = self.ph_rule.remediate_issue(slide, presentation, issue, skip_empty_text=skip_empty_text)
                     step_actions.append(action)
                     if action.status == RemediationStatus.APPLIED:
                         converted_count += 1

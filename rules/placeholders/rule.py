@@ -72,7 +72,7 @@ class PlaceholderRule(BaseAccessibilityRule):
             "and safely materializes placeholder structures without altering visual layout."
         )
 
-    def evaluate(self, slide: SlideModel, presentation: PresentationModel) -> List[Issue]:
+    def evaluate(self, slide: SlideModel, presentation: PresentationModel, skip_empty_text: bool = False) -> List[Issue]:
         issues: List[Issue] = []
         raw_slide = slide.raw_slide
         if raw_slide is None or not hasattr(raw_slide, "_element"):
@@ -87,7 +87,8 @@ class PlaceholderRule(BaseAccessibilityRule):
             slide_number=slide.slide_number,
             animation_target_ids=anim_targets,
             slide_height_pt=slide_h_pt,
-            slide_width_pt=slide_w_pt
+            slide_width_pt=slide_w_pt,
+            skip_empty_text=skip_empty_text
         )
 
         for analysis in analyses:
@@ -251,7 +252,8 @@ class PlaceholderRule(BaseAccessibilityRule):
         self,
         slide: SlideModel,
         presentation: PresentationModel,
-        issue: Issue
+        issue: Issue,
+        skip_empty_text: bool = False
     ) -> RemediationAction:
         """
         Executes physical in-place placeholder conversion for an approved issue.
@@ -291,7 +293,8 @@ class PlaceholderRule(BaseAccessibilityRule):
             slide_number=slide.slide_number,
             raw_slide=raw_slide,
             animation_target_ids=anim_targets,
-            approved_shape_ids=[shape_id] if shape_id else None
+            approved_shape_ids=[shape_id] if shape_id else None,
+            skip_empty_text=skip_empty_text
         )
 
         if not result.success:
