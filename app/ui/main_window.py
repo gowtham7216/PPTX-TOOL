@@ -1752,7 +1752,8 @@ class SlideGuardMainWindow:
                 self.root.after(0, self._on_reading_order_finished)
             except Exception as e:
                 logger.exception("Reading order remediation failed: %s", e)
-                self.root.after(0, lambda: self._on_reading_order_error(e))
+                err_obj = e
+                self.root.after(0, lambda err=err_obj: self._on_reading_order_error(err))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1894,7 +1895,8 @@ class SlideGuardMainWindow:
                 self.root.after(0, self._on_outline_order_finished)
             except Exception as e:
                 logger.exception("Outline order alignment failed: %s", e)
-                self.root.after(0, lambda: self._on_outline_order_error(e))
+                err_obj = e
+                self.root.after(0, lambda err=err_obj: self._on_outline_order_error(err))
 
         threading.Thread(target=_worker, daemon=True).start()
 

@@ -55,6 +55,19 @@ PH_TAG = f"{{{NS['p']}}}ph"
 PH_PATTERN = re.compile(r'<p:ph([^>]*)/>')
 
 
+def _safe_xpath(elem, xpath_expr: str) -> list:
+    """Executes xpath query safely on either python-pptx BaseOxmlElement or raw lxml Element."""
+    try:
+        return elem.xpath(xpath_expr)
+    except TypeError:
+        return elem.xpath(xpath_expr, namespaces=NS)
+    except Exception:
+        try:
+            return elem.xpath(xpath_expr, namespaces=NS)
+        except Exception:
+            return []
+
+
 def get_slide_ph_idx_sequence(slide_elem) -> List[int]:
     """
     Returns the list of integer idx values from <p:ph> elements
@@ -64,7 +77,7 @@ def get_slide_ph_idx_sequence(slide_elem) -> List[int]:
         return []
     
     # Locate spTree container
-    sp_trees = slide_elem.xpath(".//p:spTree", namespaces=NS)
+    sp_trees = _safe_xpath(slide_elem, ".//p:spTree")
     sp_tree = sp_trees[0] if sp_trees else slide_elem
 
     seq: List[int] = []
@@ -97,7 +110,7 @@ def renumber_slide_outline_order(slide_elem) -> int:
     if slide_elem is None:
         return 0
 
-    sp_trees = slide_elem.xpath(".//p:spTree", namespaces=NS)
+    sp_trees = _safe_xpath(slide_elem, ".//p:spTree")
     sp_tree = sp_trees[0] if sp_trees else slide_elem
 
     counter = 0
@@ -120,7 +133,7 @@ def renumber_slide_outline_order(slide_elem) -> int:
                     parent_shape = parent_shape.getparent()
 
                 if parent_shape is not None and parent_shape != sp_tree:
-                    cnvprs = parent_shape.xpath(".//p:cNvPr", namespaces=NS)
+                    cnvprs = _safe_xpath(parent_shape, ".//p:cNvPr")
                     if cnvprs:
                         c_name = cnvprs[0].get("name", "")
                         # If name matches Content Placeholder \d+

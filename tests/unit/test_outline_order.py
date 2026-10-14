@@ -201,3 +201,24 @@ def test_remediation_service_outline_order(tmp_path):
     assert len(applied) == 2
     assert actions[0].rule_id == "PIPELINE_OUTLINE_ORDER"
     assert "renumbered" in actions[0].description
+
+
+def test_real_python_pptx_slide_outline_order(tmp_path):
+    import pptx
+    prs = pptx.Presentation()
+    # Add a slide with title and content layout
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    slide_model = SlideModel(slide_id=1, slide_number=1, title="Real Slide")
+    slide_model.raw_slide = slide
+
+    # Verify BaseOxmlElement works with get_slide_ph_idx_sequence
+    seq = get_slide_ph_idx_sequence(slide._element)
+    assert isinstance(seq, list)
+
+    pres = PresentationModel(file_path=tmp_path / "real.pptx")
+    pres.slides = [slide_model]
+    pres.raw_presentation = prs
+
+    summary = fix_outline_order_on_presentation(pres)
+    assert summary["slides_checked"] == 1
+    assert "slides_fixed" in summary
