@@ -298,6 +298,8 @@ class SlideGuardMainWindow:
 
         # User Approval Gate
         self.approval_var = tk.BooleanVar(value=True)
+        self.btn_fix_outline: Optional[tk.Button] = None
+        self.btn_card_outline: Optional[tk.Button] = None
 
         # Reports & Validation View Variables
         self.val_scores_var = tk.StringVar(value="Pre-Score: --.-/100 | Post-Score: Pending")
@@ -1002,6 +1004,24 @@ class SlideGuardMainWindow:
         )
         self.btn_fix_ro.pack(side=tk.LEFT)
 
+        self.btn_fix_outline = tk.Button(
+            action_box,
+            text="📑 Fix Outline Order",
+            font=("Segoe UI", 9, "bold"),
+            fg=BLUE_PRIMARY,
+            bg=BG_WHITE,
+            activebackground=BG_SURFACE_ALT,
+            activeforeground=BLUE_HOVER,
+            relief=tk.SOLID,
+            bd=1,
+            highlightbackground=BORDER_SUBTLE,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=self._on_apply_outline_order_clicked,
+        )
+        self.btn_fix_outline.pack(side=tk.LEFT, padx=(8, 0))
+
         # Reading Order Detailed Treeview Card
         table_card = tk.Frame(ro_container, bg=BG_WHITE, highlightbackground=BORDER_SUBTLE, highlightthickness=1)
         table_card.pack(fill=tk.BOTH, expand=True)
@@ -1069,18 +1089,20 @@ class SlideGuardMainWindow:
         actions_grid = tk.Frame(rem_container, bg=BG_PAGE)
         actions_grid.pack(fill=tk.X, pady=(0, 10))
 
-        # Card 1: Reading Order
+        # Card 1: Reading Order & Outline Order
         self.btn_apply_ro, self.btn_inspect_ro = self._build_action_card(
             parent=actions_grid,
             col_idx=0,
             icon_char="🔀",
             title="Reading Order Alignment",
-            desc="Aligns shape reading order to follow logical visual hierarchy for screen readers.",
+            desc="Aligns shape reading order and Outline View order to follow logical visual hierarchy.",
             status_var=self.ro_card_status_var,
             meta_var=self.ro_affected_meta_var,
             action_text="Apply Reading Order",
             action_cmd=self._on_apply_reading_order_clicked,
             inspect_cmd=lambda: self._select_nav(2),
+            extra_action_text="📑 Fix Outline Order",
+            extra_action_cmd=self._on_apply_outline_order_clicked,
         )
 
         # Card 2: Placeholder Conversion
@@ -1173,6 +1195,8 @@ class SlideGuardMainWindow:
         checkbox_var: Optional[tk.BooleanVar] = None,
         checkbox_text: str = "",
         checkbox_cmd: Optional[Any] = None,
+        extra_action_text: Optional[str] = None,
+        extra_action_cmd: Optional[Any] = None,
     ):
         card = tk.Frame(parent, bg=BG_WHITE, highlightbackground=BORDER_SUBTLE, highlightthickness=1)
         card.grid(row=0, column=col_idx, sticky="nsew", padx=4)
@@ -1231,6 +1255,27 @@ class SlideGuardMainWindow:
             command=action_cmd,
         )
         btn.pack(fill=tk.X)
+
+        # Optional secondary action button (e.g. Fix Outline Order)
+        if extra_action_text and extra_action_cmd:
+            btn_extra = tk.Button(
+                in_c,
+                text=extra_action_text,
+                font=("Segoe UI", 8, "bold"),
+                fg=BLUE_PRIMARY,
+                bg=BG_WHITE,
+                activebackground=BG_SURFACE_ALT,
+                activeforeground=BLUE_HOVER,
+                relief=tk.SOLID,
+                bd=1,
+                highlightbackground=BORDER_SUBTLE,
+                padx=8,
+                pady=4,
+                cursor="hand2",
+                command=extra_action_cmd,
+            )
+            btn_extra.pack(fill=tk.X, pady=(4, 0))
+            self.btn_card_outline = btn_extra
 
         # Inspect button (secondary)
         btn_inspect = tk.Button(
@@ -1793,6 +1838,114 @@ class SlideGuardMainWindow:
                 f"No changes required.\n\n"
                 f"Analysis confirms all {total_slides} slides are already in compliant logical reading order.\n"
                 f"Original presentation was preserved."
+            )
+
+        self._populate_reports_tab()
+
+    def _on_apply_outline_order_clicked(self):
+        """Batch-aligns Outline View order across all slides to match Reading Order."""
+        if getattr(self, "is_busy", False) or getattr(self, "_remediation_in_progress", False):
+            logger.info("Ignoring duplicate Outline Order trigger: remediation already in progress.")
+            return
+        if not self.job_context:
+            messagebox.showwarning("File Required", "Please select and analyze a presentation first.")
+            return
+
+        # Disable buttons to prevent double-click or re-entry
+        self._remediation_in_progress = True
+        if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
+            self.btn_fix_outline.config(state=tk.DISABLED)
+        if hasattr(self, "btn_card_outline") and self.btn_card_outline:
+            self.btn_card_outline.config(state=tk.DISABLED)
+
+        # User Approval Gate
+        if not self.approval_var.get():
+            confirmed = messagebox.askyesno(
+                "Remediation Approval Required",
+                "Aligning Outline Order will renumber placeholder indices in document order in a candidate presentation copy.\n\n"
+                "This ensures Outline View displays text in the exact same sequence as Reading Order.\n\n"
+                "Do you approve batch outline order alignment for all slides?"
+            )
+            if not confirmed:
+                self._remediation_in_progress = False
+                if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
+                    self.btn_fix_outline.config(state=tk.NORMAL)
+                if hasattr(self, "btn_card_outline") and self.btn_card_outline:
+                    self.btn_card_outline.config(state=tk.NORMAL)
+                self.status_var.set("Outline order alignment cancelled by user.")
+                return
+            self.approval_var.set(True)
+
+        self.job_context.user_approved_remediation = True
+        self.is_busy = True
+        self.prog_bar["value"] = 0
+        self.status_var.set("Batch-aligning Outline Order across all slides...")
+
+        def _worker():
+            try:
+                def _progress(curr, total, msg):
+                    pct = int((curr / max(1, total)) * 100)
+                    self.root.after(0, lambda: self._update_progress(pct, msg))
+
+                self.job_context = self.controller.execute_outline_order_remediation(
+                    self.job_context,
+                    progress_callback=_progress
+                )
+                self.root.after(0, self._on_outline_order_finished)
+            except Exception as e:
+                logger.exception("Outline order alignment failed: %s", e)
+                self.root.after(0, lambda: self._on_outline_order_error(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_outline_order_error(self, err: Exception):
+        self._remediation_in_progress = False
+        self.is_busy = False
+        if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
+            self.btn_fix_outline.config(state=tk.NORMAL)
+        if hasattr(self, "btn_card_outline") and self.btn_card_outline:
+            self.btn_card_outline.config(state=tk.NORMAL)
+        self.status_var.set(f"Outline order error: {err}")
+        self._log_remediation_event(f"Outline Order: FAILED ({err})")
+        messagebox.showerror("Remediation Error", f"Outline order alignment failed: {err}")
+
+    def _on_outline_order_finished(self):
+        self._remediation_in_progress = False
+        self.is_busy = False
+        if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
+            self.btn_fix_outline.config(state=tk.NORMAL)
+        if hasattr(self, "btn_card_outline") and self.btn_card_outline:
+            self.btn_card_outline.config(state=tk.NORMAL)
+        ctx = self.job_context
+
+        outline_actions = [a for a in ctx.remediation_actions if a.rule_id == "PIPELINE_OUTLINE_ORDER"]
+        applied = sum(1 for a in outline_actions if a.status == RemediationStatus.APPLIED and a.slide_number > 0)
+        overall_action = next((a for a in outline_actions if a.slide_number == 0), None)
+
+        if applied > 0:
+            summary = overall_action.remediated_state if overall_action else {}
+            total_renumbered = summary.get("total_placeholders_renumbered", 0)
+            status_text = f"Outline Order: APPLIED ({applied} slides aligned, {total_renumbered} placeholders renumbered)"
+            self._add_activity_event("blue", f"Outline Order aligned: {applied} slides ({total_renumbered} placeholders)")
+            self._log_remediation_event(status_text)
+            self.status_var.set(f"Successfully aligned Outline View order on {applied} slide(s).")
+            messagebox.showinfo(
+                "Outline Order Aligned",
+                f"Successfully aligned Outline View order on {applied} slide(s) ({total_renumbered} placeholders renumbered).\n\n"
+                f"Outline View will now display text in the exact same logical order as Reading Order.\n"
+                f"Verified in candidate presentation copy.\n"
+                f"Original file was preserved without modification."
+            )
+        else:
+            status_text = "Outline Order: NO_CHANGES (Outline View already matches Reading Order across all slides)"
+            self._add_activity_event("green", "Outline Order: all slides already match Reading Order")
+            self._log_remediation_event(status_text)
+            self.status_var.set("No changes required: Outline View already matches Reading Order.")
+            messagebox.showinfo(
+                "No Changes Required",
+                "No changes required.\n\n"
+                "Analysis confirms Outline View text order already matches Reading Order across all slides.\n"
+                "Original presentation was preserved."
             )
 
         self._populate_reports_tab()

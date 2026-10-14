@@ -199,6 +199,27 @@ class AppController:
         self.remediator.remediate_reading_order(context, self.current_presentation)
         return self._finalize_candidate_and_export(context)
 
+    def execute_outline_order_remediation(
+        self,
+        context: JobContext,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> JobContext:
+        """Executes independent Outline Order alignment so Outline View matches Reading Order, and saves candidate copy."""
+        if not context.user_approved_remediation:
+            raise PermissionError("User approval is required before running remediation.")
+
+        if self.current_presentation is None:
+            if context.candidate_file and context.candidate_file.exists():
+                self.current_presentation = self.reader.read(context.candidate_file)
+            else:
+                self.current_presentation = self.reader.read(context.working_file)
+
+        if progress_callback:
+            progress_callback(1, 2, "Aligning Outline View order to match Reading Order...")
+
+        self.remediator.remediate_outline_order(context, self.current_presentation)
+        return self._finalize_candidate_and_export(context)
+
     def execute_placeholder_remediation(
         self,
         context: JobContext,

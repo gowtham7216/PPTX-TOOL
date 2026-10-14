@@ -237,7 +237,17 @@ class RemediationService:
             confidence=1.0,
             remediated_state=reconciliation_summary.to_dict()
         )
-        actions.append(step_6_action)
+        # Align Outline View order across all slides so Outline matches Reading Order
+        try:
+            from rules.reading_order.outline_order import fix_outline_order_on_presentation
+            outline_summary = fix_outline_order_on_presentation(presentation)
+            if outline_summary.get("slides_fixed", 0) > 0:
+                logger.info(
+                    "Automatically aligned Outline Order on %d slides (%d placeholders renumbered).",
+                    outline_summary["slides_fixed"], outline_summary["total_placeholders_renumbered"]
+                )
+        except Exception as oe:
+            logger.warning("Outline order auto-alignment warning: %s", oe)
 
         # Save candidate output to isolated candidate directory
         if context.candidate_file and presentation.raw_presentation:
@@ -266,6 +276,13 @@ class RemediationService:
         reordered_count = sum(1 for a in ro_actions if a.status == RemediationStatus.APPLIED)
         failed_count = sum(1 for a in ro_actions if a.status == RemediationStatus.FAILED)
         skipped_count = sum(1 for a in ro_actions if a.status == RemediationStatus.SKIPPED)
+
+        # Align Outline View order to match Reading Order
+        try:
+            from rules.reading_order.outline_order import fix_outline_order_on_presentation
+            fix_outline_order_on_presentation(presentation)
+        except Exception as oe:
+            logger.warning("Outline order auto-alignment warning: %s", oe)
 
         if reordered_count > 0:
             overall_status = RemediationStatus.APPLIED
@@ -393,6 +410,13 @@ class RemediationService:
         context.remediation_actions.extend(ph_actions)
         context.remediation_actions.append(step_3_action)
 
+        # Align Outline View order to match placeholders
+        try:
+            from rules.reading_order.outline_order import fix_outline_order_on_presentation
+            fix_outline_order_on_presentation(presentation)
+        except Exception as oe:
+            logger.warning("Outline order auto-alignment warning: %s", oe)
+
         if context.candidate_file and presentation.raw_presentation:
             try:
                 self.writer.write(presentation, context.candidate_file)
@@ -402,6 +426,75 @@ class RemediationService:
 
         context.stage = JobStage.REMEDIATED
         return ph_actions
+
+    def remediate_outline_order(
+        self,
+        context: JobContext,
+        presentation: PresentationModel
+    ) -> List[RemediationAction]:
+        """
+        Executes on-demand Outline Order alignment across all slides so Outline View
+        text order matches Reading Order sequence, and saves the candidate copy.
+        """
+        if not context.user_approved_remediation:
+            raise PermissionError("Remediation cannot proceed without explicit user approval.")
+
+        context.stage = JobStage.REMEDIATING
+        logger.info("Executing independent Outline Order alignment for job %s", context.job_id)
+
+        from rules.reading_order.outline_order import fix_outline_order_on_presentation
+        summary = fix_outline_order_on_presentation(presentation)
+
+        actions: List[RemediationAction] = []
+        slides_fixed = summary.get("slides_fixed", 0)
+        total_renumbered = summary.get("total_placeholders_renumbered", 0)
+
+        for detail in summary.get("details", []):
+            s_num = detail["slide_number"]
+            c = detail["renumbered_count"]
+            actions.append(
+                RemediationAction(
+                    action_id=f"rem_outline_order_{s_num}",
+                    rule_id="PIPELINE_OUTLINE_ORDER",
+                    slide_number=s_num,
+                    description=f"Slide {s_num}: Aligned Outline View order ({c} placeholder indices renumbered).",
+                    status=RemediationStatus.APPLIED,
+                    confidence=1.0,
+                    is_user_approved=True,
+                    remediated_state=detail
+                )
+            )
+
+        overall_action = RemediationAction(
+            action_id="rem_step_outline_order",
+            rule_id="PIPELINE_OUTLINE_ORDER",
+            slide_number=0,
+            description=(
+                f"Outline Order Alignment: Aligned {slides_fixed} slide(s) ({total_renumbered} placeholder indices renumbered) to match Reading Order."
+                if slides_fixed > 0
+                else "Outline Order Alignment: Outline View already matches Reading Order across all slides."
+            ),
+            status=RemediationStatus.APPLIED if slides_fixed > 0 else RemediationStatus.NO_CHANGES,
+            confidence=1.0,
+            is_user_approved=True,
+            remediated_state=summary
+        )
+        actions.append(overall_action)
+
+        if context.candidate_file and presentation.raw_presentation:
+            try:
+                self.writer.write(presentation, context.candidate_file)
+                logger.info("Saved candidate working copy after outline order alignment to %s", context.candidate_file)
+            except Exception as e:
+                logger.error("Failed to write candidate presentation after outline fix: %s", e)
+
+        context.remediation_actions = [
+            a for a in context.remediation_actions
+            if a.rule_id != "PIPELINE_OUTLINE_ORDER"
+        ]
+        context.remediation_actions.extend(actions)
+        context.stage = JobStage.REMEDIATED
+        return actions
 
     def remediate_alt_text_and_decorative(
         self,
