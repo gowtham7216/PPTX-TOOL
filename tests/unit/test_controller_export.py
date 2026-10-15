@@ -50,7 +50,7 @@ def test_setup(tmp_path, sample_presentation_path):
 
 
 def test_one_pptx_export_per_remediation_action(test_setup):
-    """Verify that a single remediation action creates exactly one candidate PPTX, not numbered duplicates."""
+    """Verify that a single remediation action creates exactly one step PPTX, not numbered duplicates."""
     controller = test_setup["controller"]
     source = test_setup["source_pptx"]
     test_dir = test_setup["test_dir"]
@@ -64,14 +64,14 @@ def test_one_pptx_export_per_remediation_action(test_setup):
     assert context.final_output_file is not None
     assert context.final_output_file.exists()
 
-    # Verify only one remediated file was created in test_dir
-    remediated_files = list(test_dir.glob("*_SlideGuard_Remediated*.pptx"))
+    # Verify step remediated file was created in test_dir
+    remediated_files = list(test_dir.glob("*_reading_order_fixed*.pptx"))
     assert len(remediated_files) == 1, f"Expected 1 remediated file, found: {remediated_files}"
-    assert remediated_files[0].name == "TestPresentation_SlideGuard_Remediated.pptx"
+    assert remediated_files[0].name == "TestPresentation_reading_order_fixed.pptx"
 
 
-def test_multiple_remediation_actions_reuse_same_output_path(test_setup):
-    """Verify that successive remediation actions in the same job update the single output file without creating (1), (2)."""
+def test_multiple_remediation_actions_produce_step_outputs(test_setup):
+    """Verify that manual remediation steps export distinct step outputs while preserving cumulative state."""
     controller = test_setup["controller"]
     source = test_setup["source_pptx"]
     test_dir = test_setup["test_dir"]
@@ -80,23 +80,28 @@ def test_multiple_remediation_actions_reuse_same_output_path(test_setup):
     context = controller.execute_analysis(context)
     context.user_approved_remediation = True
 
-    # Action 1: Reading Order
-    context = controller.execute_reading_order_remediation(context)
-    first_output = context.final_output_file
-    assert first_output.name == "TestPresentation_SlideGuard_Remediated.pptx"
-
-    # Action 2: Placeholders
+    # Step 1: Placeholders
     context = controller.execute_placeholder_remediation(context)
-    assert context.final_output_file == first_output
+    ph_output = context.final_output_file
+    assert ph_output.name == "TestPresentation_placeholder_fixed.pptx"
+    assert ph_output.exists()
 
-    # Action 3: List semantics
-    context = controller.execute_list_remediation(context)
-    assert context.final_output_file == first_output
+    # Step 2: Reading Order
+    context = controller.execute_reading_order_remediation(context)
+    ro_output = context.final_output_file
+    assert ro_output.name == "TestPresentation_reading_order_fixed.pptx"
+    assert ro_output.exists()
 
-    # Verify still exactly one remediated file in test_dir
-    remediated_files = list(test_dir.glob("*_SlideGuard_Remediated*.pptx"))
-    assert len(remediated_files) == 1, f"Expected 1 remediated file, found: {remediated_files}"
-    assert remediated_files[0] == first_output
+    # Step 3: Outline View Rearrange
+    context = controller.execute_outline_order_remediation(context)
+    outline_output = context.final_output_file
+    assert outline_output.name == "TestPresentation_outline_view_fixed.pptx"
+    assert outline_output.exists()
+
+    # Re-running same step within same job updates that step's file without creating (1)
+    context = controller.execute_reading_order_remediation(context)
+    assert context.final_output_file == ro_output
+    assert not (test_dir / "TestPresentation_reading_order_fixed (1).pptx").exists()
 
 
 def test_automatic_and_manual_report_reuse_same_report_path(test_setup):
@@ -140,7 +145,7 @@ def test_new_job_does_not_overwrite_previous_job_outputs(test_setup):
 
     job1_pptx = ctx1.final_output_file
     job1_report = ctx1.final_report_file
-    assert job1_pptx.name == "TestPresentation_SlideGuard_Remediated.pptx"
+    assert job1_pptx.name == "TestPresentation_reading_order_fixed.pptx"
     assert job1_report.name == "TestPresentation_SlideGuard_Report.md"
 
     # Job 2 execution (new job on same source file)
@@ -153,7 +158,7 @@ def test_new_job_does_not_overwrite_previous_job_outputs(test_setup):
     job2_pptx = ctx2.final_output_file
     job2_report = ctx2.final_report_file
 
-    assert job2_pptx.name == "TestPresentation_SlideGuard_Remediated (1).pptx"
+    assert job2_pptx.name == "TestPresentation_reading_order_fixed (1).pptx"
     assert job2_report.name == "TestPresentation_SlideGuard_Report (1).md"
 
     # Both Job 1 and Job 2 files must exist independently

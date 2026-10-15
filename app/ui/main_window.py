@@ -285,6 +285,7 @@ class SlideGuardMainWindow:
         # Remediation Workspace Card Statuses
         self.ro_card_status_var = tk.StringVar(value="● Pending Audit")
         self.ph_card_status_var = tk.StringVar(value="● Pending Audit")
+        self.outline_card_status_var = tk.StringVar(value="● Pending Audit")
         self.val_card_status_var = tk.StringVar(value="● Unverified")
         self.rep_card_status_var = tk.StringVar(value="● Not Generated")
         self.auth_card_status_var = tk.StringVar(value="● Idle")
@@ -294,12 +295,14 @@ class SlideGuardMainWindow:
         self.ro_affected_meta_var = tk.StringVar(value="🗂 0 affected slides")
         self.ro_slides_meta_var = tk.StringVar(value="📄 0 slides")
         self.ph_eligible_meta_var = tk.StringVar(value="🗂 0 eligible items")
+        self.outline_affected_meta_var = tk.StringVar(value="📄 0 slides")
         self.skip_empty_text_var = tk.BooleanVar(value=False)
 
         # User Approval Gate
         self.approval_var = tk.BooleanVar(value=True)
         self.btn_fix_outline: Optional[tk.Button] = None
         self.btn_card_outline: Optional[tk.Button] = None
+        self.btn_apply_outline: Optional[tk.Button] = None
 
         # Reports & Validation View Variables
         self.val_scores_var = tk.StringVar(value="Pre-Score: --.-/100 | Post-Score: Pending")
@@ -637,52 +640,20 @@ class SlideGuardMainWindow:
             tk.Label(in_c, text=sub, font=("Segoe UI", 8), fg=TEXT_MUTED, bg=BG_WHITE).pack(anchor=tk.W)
 
     def _build_dashboard_specialized_summaries(self, parent: tk.Widget):
-        """Builds Reading Order summary and Placeholder summary cards."""
+        """Builds Placeholder summary (Step 1) and Reading Order summary (Step 2) cards."""
         row_frame = tk.Frame(parent, bg=BG_PAGE)
         row_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # Reading Order Summary Card
-        ro_card = tk.Frame(row_frame, bg=BG_WHITE, highlightbackground=BORDER_SUBTLE, highlightthickness=1)
-        ro_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
-
-        in_ro = tk.Frame(ro_card, bg=BG_WHITE, padx=16, pady=12)
-        in_ro.pack(fill=tk.BOTH, expand=True)
-
-        ro_header = tk.Frame(in_ro, bg=BG_WHITE)
-        ro_header.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(ro_header, text="🔀 Reading Order Sequence", font=("Segoe UI", 11, "bold"), fg=TEXT_NAVY, bg=BG_WHITE).pack(side=tk.LEFT)
-
-        ro_btn = tk.Button(
-            ro_header,
-            text="View Reading Order →",
-            font=("Segoe UI", 8, "bold"),
-            fg=BLUE_PRIMARY,
-            bg=BG_WHITE,
-            relief=tk.FLAT,
-            bd=0,
-            cursor="hand2",
-            command=lambda: self._select_nav(2),
-        )
-        ro_btn.pack(side=tk.RIGHT)
-
-        grid_ro = tk.Frame(in_ro, bg=BG_WHITE)
-        grid_ro.pack(fill=tk.X)
-
-        self._create_summary_box(grid_ro, "Evaluated", self.ro_total_var, TEXT_PRIMARY, 0)
-        self._create_summary_box(grid_ro, "In Sequence", self.ro_correct_var, COLOR_GREEN, 1)
-        self._create_summary_box(grid_ro, "Needs Reorder", self.ro_incorrect_var, COLOR_AMBER, 2)
-        self._create_summary_box(grid_ro, "Manual Review", self.ro_review_var, COLOR_BLUE, 3)
-
-        # Placeholder Summary Card
+        # 1. Placeholder Summary Card (Step 1)
         ph_card = tk.Frame(row_frame, bg=BG_WHITE, highlightbackground=BORDER_SUBTLE, highlightthickness=1)
-        ph_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+        ph_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
 
         in_ph = tk.Frame(ph_card, bg=BG_WHITE, padx=16, pady=12)
         in_ph.pack(fill=tk.BOTH, expand=True)
 
         ph_header = tk.Frame(in_ph, bg=BG_WHITE)
         ph_header.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(ph_header, text="🧩 Placeholder Architecture", font=("Segoe UI", 11, "bold"), fg=TEXT_NAVY, bg=BG_WHITE).pack(side=tk.LEFT)
+        tk.Label(ph_header, text="🧩 Step 1: Placeholder Architecture", font=("Segoe UI", 11, "bold"), fg=TEXT_NAVY, bg=BG_WHITE).pack(side=tk.LEFT)
 
         ph_btn = tk.Button(
             ph_header,
@@ -704,6 +675,38 @@ class SlideGuardMainWindow:
         self._create_summary_box(grid_ph, "Content/Body", self.ph_body_var, TEXT_PRIMARY, 1)
         self._create_summary_box(grid_ph, "Pictures", self.ph_pics_var, TEXT_PRIMARY, 2)
         self._create_summary_box(grid_ph, "Safe to Convert", self.ph_safe_var, COLOR_GREEN, 3)
+
+        # 2. Reading Order Summary Card (Step 2)
+        ro_card = tk.Frame(row_frame, bg=BG_WHITE, highlightbackground=BORDER_SUBTLE, highlightthickness=1)
+        ro_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+
+        in_ro = tk.Frame(ro_card, bg=BG_WHITE, padx=16, pady=12)
+        in_ro.pack(fill=tk.BOTH, expand=True)
+
+        ro_header = tk.Frame(in_ro, bg=BG_WHITE)
+        ro_header.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(ro_header, text="🔀 Step 2: Reading Order Sequence", font=("Segoe UI", 11, "bold"), fg=TEXT_NAVY, bg=BG_WHITE).pack(side=tk.LEFT)
+
+        ro_btn = tk.Button(
+            ro_header,
+            text="View Reading Order →",
+            font=("Segoe UI", 8, "bold"),
+            fg=BLUE_PRIMARY,
+            bg=BG_WHITE,
+            relief=tk.FLAT,
+            bd=0,
+            cursor="hand2",
+            command=lambda: self._select_nav(2),
+        )
+        ro_btn.pack(side=tk.RIGHT)
+
+        grid_ro = tk.Frame(in_ro, bg=BG_WHITE)
+        grid_ro.pack(fill=tk.X)
+
+        self._create_summary_box(grid_ro, "Evaluated", self.ro_total_var, TEXT_PRIMARY, 0)
+        self._create_summary_box(grid_ro, "In Sequence", self.ro_correct_var, COLOR_GREEN, 1)
+        self._create_summary_box(grid_ro, "Needs Reorder", self.ro_incorrect_var, COLOR_AMBER, 2)
+        self._create_summary_box(grid_ro, "Manual Review", self.ro_review_var, COLOR_BLUE, 3)
 
     def _create_summary_box(self, parent: tk.Widget, label: str, var: tk.StringVar, color: str, col_idx: int):
         f = tk.Frame(parent, bg=BG_SURFACE_ALT, highlightbackground=BORDER_SUBTLE, highlightthickness=1, padx=10, pady=8)
@@ -1006,7 +1009,7 @@ class SlideGuardMainWindow:
 
         self.btn_fix_outline = tk.Button(
             action_box,
-            text="📑 Fix Outline Order",
+            text="📑 Rearrange Outline View",
             font=("Segoe UI", 9, "bold"),
             fg=BLUE_PRIMARY,
             bg=BG_WHITE,
@@ -1085,32 +1088,16 @@ class SlideGuardMainWindow:
         )
         chk_approval.pack(side=tk.RIGHT)
 
-        # 4 Primary Action Cards Grid
+        # 4 Primary Action Cards Grid (Ordered by Manual Remediation Workflow: 1 -> 2 -> 3 -> 4)
         actions_grid = tk.Frame(rem_container, bg=BG_PAGE)
         actions_grid.pack(fill=tk.X, pady=(0, 10))
 
-        # Card 1: Reading Order & Outline Order
-        self.btn_apply_ro, self.btn_inspect_ro = self._build_action_card(
-            parent=actions_grid,
-            col_idx=0,
-            icon_char="🔀",
-            title="Reading Order Alignment",
-            desc="Aligns shape reading order and Outline View order to follow logical visual hierarchy.",
-            status_var=self.ro_card_status_var,
-            meta_var=self.ro_affected_meta_var,
-            action_text="Apply Reading Order",
-            action_cmd=self._on_apply_reading_order_clicked,
-            inspect_cmd=lambda: self._select_nav(2),
-            extra_action_text="📑 Fix Outline Order",
-            extra_action_cmd=self._on_apply_outline_order_clicked,
-        )
-
-        # Card 2: Placeholder Conversion
+        # Card 1 (Col 0): 1. Placeholder Conversion
         self.btn_apply_ph, self.btn_inspect_ph = self._build_action_card(
             parent=actions_grid,
-            col_idx=1,
+            col_idx=0,
             icon_char="🧩",
-            title="Placeholder Architecture",
+            title="1. Placeholder Conversion",
             desc="Safely converts eligible free-floating shapes to native PowerPoint layout placeholders.",
             status_var=self.ph_card_status_var,
             meta_var=self.ph_eligible_meta_var,
@@ -1122,33 +1109,52 @@ class SlideGuardMainWindow:
             checkbox_cmd=self._on_skip_empty_toggled,
         )
 
-        # Card 3: Validate & Compare
-        self.btn_run_val, _ = self._build_action_card(
+        # Card 2 (Col 1): 2. Reading Order Alignment
+        self.btn_apply_ro, self.btn_inspect_ro = self._build_action_card(
+            parent=actions_grid,
+            col_idx=1,
+            icon_char="🔀",
+            title="2. Reading Order Alignment",
+            desc="Aligns shape reading order and assistive technology flow to follow logical visual hierarchy.",
+            status_var=self.ro_card_status_var,
+            meta_var=self.ro_affected_meta_var,
+            action_text="Fix Reading Order",
+            action_cmd=self._on_apply_reading_order_clicked,
+            inspect_cmd=lambda: self._select_nav(2),
+        )
+
+        # Card 3 (Col 2): 3. Outline View Rearrange
+        self.btn_apply_outline, self.btn_inspect_outline = self._build_action_card(
             parent=actions_grid,
             col_idx=2,
+            icon_char="📑",
+            title="3. Outline View Rearrange",
+            desc="Rearranges Outline View order across all slides so Outline View text matches resolved Reading Order.",
+            status_var=self.outline_card_status_var,
+            meta_var=self.outline_affected_meta_var,
+            action_text="Rearrange Outline View",
+            action_cmd=self._on_apply_outline_order_clicked,
+            inspect_cmd=lambda: self._select_nav(2),
+        )
+        self.btn_card_outline = self.btn_apply_outline
+
+        # Card 4 (Col 3): 4. Validation & Structural Compare
+        self.btn_run_val, _ = self._build_action_card(
+            parent=actions_grid,
+            col_idx=3,
             icon_char="🔍",
-            title="Validation & Structural Compare",
-            desc="Certifies OOXML validity, shape coordinates, formatting, and Phase 10 QA suite.",
+            title="4. Validation & Compare",
+            desc="Certifies OOXML validity, shape coordinates, formatting, and Phase 10 QA compliance.",
             status_var=self.val_card_status_var,
             meta_var=self.metric_integrity_var,
             action_text="Run Validation & Compare",
             action_cmd=self._on_apply_validation_clicked,
             inspect_cmd=lambda: self._select_nav(4),
+            extra_action_text="📑 Generate Audit Report",
+            extra_action_cmd=self._on_generate_report_clicked,
         )
 
-        # Card 4: Generate Report
-        self.generate_report_btn, _ = self._build_action_card(
-            parent=actions_grid,
-            col_idx=3,
-            icon_char="📑",
-            title="Accessibility Audit Report",
-            desc="Produces comprehensive Markdown & JSON compliance audit reports.",
-            status_var=self.rep_card_status_var,
-            meta_var=tk.StringVar(value="Export: WCAG 2.1 AA"),
-            action_text="Generate Audit Report",
-            action_cmd=self._on_generate_report_clicked,
-            inspect_cmd=lambda: self._select_nav(4),
-        )
+        self.generate_report_btn = tk.Button(self.master_frame, command=self._on_generate_report_clicked)
 
         # Hidden & Compatibility Buttons for Backend Services
         self.btn_apply_auth = tk.Button(self.master_frame, command=self._on_apply_alt_text_clicked)
@@ -1576,6 +1582,9 @@ class SlideGuardMainWindow:
             self.ph_card_status_var.set("● Compliant")
             self.ph_eligible_meta_var.set("🗂 0 eligible items")
 
+        self.outline_card_status_var.set("● Ready")
+        self.outline_affected_meta_var.set(f"📄 {ctx.total_slides} slides")
+
         # Populate Reading Order Treeview
         for row in self.ro_tree.get_children():
             self.ro_tree.delete(row)
@@ -1780,16 +1789,19 @@ class SlideGuardMainWindow:
         failed = sum(1 for a in ro_actions if a.status == RemediationStatus.FAILED)
         total_slides = ctx.total_slides or len(ro_actions)
 
+        out_name = ctx.final_output_file.name if ctx.final_output_file else "candidate presentation"
+
         if applied > 0:
-            status_text = f"Reading Order: APPLIED ({applied} slides reordered in candidate copy)"
+            status_text = f"Reading Order: APPLIED ({applied} slides reordered in {out_name})"
             self.ro_card_status_var.set("● Applied")
             self.ro_affected_meta_var.set(f"✅ {applied} slides reordered")
-            self._add_activity_event("blue", f"Reading Order applied: {applied} slides reordered")
+            self._add_activity_event("blue", f"Reading Order applied: {applied} slides reordered -> {out_name}")
             self._log_remediation_event(status_text)
-            self.status_var.set(f"Successfully reordered {applied} slide(s) into logical reading sequence.")
+            self.status_var.set(f"Successfully reordered {applied} slide(s) into logical reading sequence. Saved as: {out_name}")
             messagebox.showinfo(
                 "Reading Order Aligned",
                 f"Successfully reordered {applied} slide(s) into logical reading sequence.\n\n"
+                f"Saved Remediated File:\n{out_name}\n\n"
                 f"Verified in candidate presentation copy.\n"
                 f"Original file was preserved without modification."
             )
@@ -1828,16 +1840,17 @@ class SlideGuardMainWindow:
                 f"No automated changes were applied to these slides. Manual author review is recommended."
             )
         else:
-            status_text = f"Reading Order: NO_CHANGES (No changes required; all {total_slides} slides already in logical order)"
+            status_text = f"Reading Order: NO_CHANGES (No changes required; all {total_slides} slides already in logical order; saved as {out_name})"
             self.ro_card_status_var.set("● No Changes")
             self.ro_affected_meta_var.set("✅ No changes required")
             self._add_activity_event("green", f"Reading Order: all {total_slides} slides already optimal")
             self._log_remediation_event(status_text)
-            self.status_var.set("No changes required: all slides already in logical reading sequence.")
+            self.status_var.set(f"No changes required: all slides already in logical reading sequence. Saved as: {out_name}")
             messagebox.showinfo(
                 "No Changes Required",
                 f"No changes required.\n\n"
-                f"Analysis confirms all {total_slides} slides are already in compliant logical reading order.\n"
+                f"Analysis confirms all {total_slides} slides are already in compliant logical reading order.\n\n"
+                f"Saved Remediated File:\n{out_name}\n\n"
                 f"Original presentation was preserved."
             )
 
@@ -1856,6 +1869,8 @@ class SlideGuardMainWindow:
         self._remediation_in_progress = True
         if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
             self.btn_fix_outline.config(state=tk.DISABLED)
+        if hasattr(self, "btn_apply_outline") and self.btn_apply_outline:
+            self.btn_apply_outline.config(state=tk.DISABLED)
         if hasattr(self, "btn_card_outline") and self.btn_card_outline:
             self.btn_card_outline.config(state=tk.DISABLED)
 
@@ -1871,6 +1886,8 @@ class SlideGuardMainWindow:
                 self._remediation_in_progress = False
                 if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
                     self.btn_fix_outline.config(state=tk.NORMAL)
+                if hasattr(self, "btn_apply_outline") and self.btn_apply_outline:
+                    self.btn_apply_outline.config(state=tk.NORMAL)
                 if hasattr(self, "btn_card_outline") and self.btn_card_outline:
                     self.btn_card_outline.config(state=tk.NORMAL)
                 self.status_var.set("Outline order alignment cancelled by user.")
@@ -1905,8 +1922,12 @@ class SlideGuardMainWindow:
         self.is_busy = False
         if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
             self.btn_fix_outline.config(state=tk.NORMAL)
+        if hasattr(self, "btn_apply_outline") and self.btn_apply_outline:
+            self.btn_apply_outline.config(state=tk.NORMAL)
         if hasattr(self, "btn_card_outline") and self.btn_card_outline:
             self.btn_card_outline.config(state=tk.NORMAL)
+        self.outline_card_status_var.set("● Failed")
+        self.outline_affected_meta_var.set("❌ Alignment failed")
         self.status_var.set(f"Outline order error: {err}")
         self._log_remediation_event(f"Outline Order: FAILED ({err})")
         messagebox.showerror("Remediation Error", f"Outline order alignment failed: {err}")
@@ -1916,9 +1937,12 @@ class SlideGuardMainWindow:
         self.is_busy = False
         if hasattr(self, "btn_fix_outline") and self.btn_fix_outline:
             self.btn_fix_outline.config(state=tk.NORMAL)
+        if hasattr(self, "btn_apply_outline") and self.btn_apply_outline:
+            self.btn_apply_outline.config(state=tk.NORMAL)
         if hasattr(self, "btn_card_outline") and self.btn_card_outline:
             self.btn_card_outline.config(state=tk.NORMAL)
         ctx = self.job_context
+        out_name = ctx.final_output_file.name if ctx.final_output_file else "candidate presentation"
 
         outline_actions = [a for a in ctx.remediation_actions if a.rule_id == "PIPELINE_OUTLINE_ORDER"]
         applied = sum(1 for a in outline_actions if a.status == RemediationStatus.APPLIED and a.slide_number > 0)
@@ -1927,27 +1951,32 @@ class SlideGuardMainWindow:
         if applied > 0:
             summary = overall_action.remediated_state if overall_action else {}
             total_renumbered = summary.get("total_placeholders_renumbered", 0)
-            status_text = f"Outline Order: APPLIED ({applied} slides aligned, {total_renumbered} placeholders renumbered)"
-            self._add_activity_event("blue", f"Outline Order aligned: {applied} slides ({total_renumbered} placeholders)")
+            status_text = f"Outline Order: APPLIED ({applied} slides aligned, {total_renumbered} placeholders renumbered in {out_name})"
+            self.outline_card_status_var.set("● Aligned")
+            self.outline_affected_meta_var.set(f"✅ {applied} slides aligned")
+            self._add_activity_event("blue", f"Outline Order aligned: {applied} slides ({total_renumbered} placeholders) -> {out_name}")
             self._log_remediation_event(status_text)
-            self.status_var.set(f"Successfully aligned Outline View order on {applied} slide(s).")
+            self.status_var.set(f"Successfully aligned Outline View order on {applied} slide(s). Saved as: {out_name}")
             messagebox.showinfo(
-                "Outline Order Aligned",
+                "Outline View Rearranged",
                 f"Successfully aligned Outline View order on {applied} slide(s) ({total_renumbered} placeholders renumbered).\n\n"
+                f"Saved Remediated File:\n{out_name}\n\n"
                 f"Outline View will now display text in the exact same logical order as Reading Order.\n"
                 f"Verified in candidate presentation copy.\n"
                 f"Original file was preserved without modification."
             )
         else:
-            status_text = "Outline Order: NO_CHANGES (Outline View already matches Reading Order across all slides)"
+            status_text = f"Outline Order: NO_CHANGES (Outline View already matches Reading Order across all slides; saved as {out_name})"
+            self.outline_card_status_var.set("● Compliant")
+            self.outline_affected_meta_var.set("✅ Already aligned")
             self._add_activity_event("green", "Outline Order: all slides already match Reading Order")
             self._log_remediation_event(status_text)
-            self.status_var.set("No changes required: Outline View already matches Reading Order.")
+            self.status_var.set(f"No changes required: Outline View already matches Reading Order. Saved as: {out_name}")
             messagebox.showinfo(
                 "No Changes Required",
-                "No changes required.\n\n"
-                "Analysis confirms Outline View text order already matches Reading Order across all slides.\n"
-                "Original presentation was preserved."
+                f"Analysis confirms Outline View text order already matches Reading Order across all slides.\n\n"
+                f"Saved Remediated File:\n{out_name}\n\n"
+                f"Original presentation was preserved."
             )
 
         self._populate_reports_tab()
@@ -2018,14 +2047,20 @@ class SlideGuardMainWindow:
         self.btn_apply_ph.config(state=tk.NORMAL)
         ctx = self.job_context
         applied = sum(1 for a in ctx.remediation_actions if a.rule_id == "SG-PH-01" and a.status == RemediationStatus.APPLIED)
+        out_name = ctx.final_output_file.name if ctx.final_output_file else "candidate presentation"
 
         self.ph_card_status_var.set("● Converted")
         self.ph_eligible_meta_var.set(f"✅ {applied} items converted")
-        self._add_activity_event("purple", f"Placeholders converted: {applied} items")
-        self._log_remediation_event(f"Placeholders: CONVERTED ({applied} objects converted to native placeholders)")
+        self._add_activity_event("purple", f"Placeholders converted: {applied} items -> {out_name}")
+        self._log_remediation_event(f"Placeholders: CONVERTED ({applied} objects converted to native placeholders in {out_name})")
 
-        self.status_var.set(f"Native placeholders converted: {applied} items.")
-        messagebox.showinfo("Placeholders Converted", f"Successfully converted {applied} shapes into native placeholders.")
+        self.status_var.set(f"Native placeholders converted: {applied} items. Saved as: {out_name}")
+        messagebox.showinfo(
+            "Placeholders Converted",
+            f"Successfully converted {applied} shapes into native placeholders.\n\n"
+            f"Saved Remediated File:\n{out_name}\n\n"
+            f"Verified in candidate presentation copy."
+        )
         self._populate_reports_tab()
 
     def _on_apply_validation_clicked(self):

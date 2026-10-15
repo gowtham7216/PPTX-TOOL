@@ -176,7 +176,7 @@ class AppController:
             skip_empty_text=skip_empty_text
         )
         context.remediation_actions = actions
-        return self._finalize_candidate_and_export(context)
+        return self._finalize_candidate_and_export(context, export_suffix="_SlideGuard_Remediated")
 
     def execute_reading_order_remediation(
         self,
@@ -197,7 +197,7 @@ class AppController:
             progress_callback(1, 2, "Aligning reading order across slides...")
 
         self.remediator.remediate_reading_order(context, self.current_presentation)
-        return self._finalize_candidate_and_export(context)
+        return self._finalize_candidate_and_export(context, export_suffix="_reading_order_fixed")
 
     def execute_outline_order_remediation(
         self,
@@ -218,7 +218,7 @@ class AppController:
             progress_callback(1, 2, "Aligning Outline View order to match Reading Order...")
 
         self.remediator.remediate_outline_order(context, self.current_presentation)
-        return self._finalize_candidate_and_export(context)
+        return self._finalize_candidate_and_export(context, export_suffix="_outline_view_fixed")
 
     def execute_placeholder_remediation(
         self,
@@ -240,7 +240,7 @@ class AppController:
             progress_callback(1, 2, "Converting shapes to native placeholders...")
 
         self.remediator.remediate_placeholders(context, self.current_presentation, skip_empty_text=skip_empty_text)
-        return self._finalize_candidate_and_export(context)
+        return self._finalize_candidate_and_export(context, export_suffix="_placeholder_fixed")
 
     def execute_alt_text_remediation(
         self,
@@ -261,7 +261,7 @@ class AppController:
             progress_callback(1, 2, "Applying alt text and marking decorative visuals...")
 
         self.remediator.remediate_alt_text_and_decorative(context, self.current_presentation)
-        return self._finalize_candidate_and_export(context)
+        return self._finalize_candidate_and_export(context, export_suffix="_alt_text_fixed")
 
     def execute_ungrouping_remediation(
         self,
@@ -282,7 +282,7 @@ class AppController:
             progress_callback(1, 2, "Selectively ungrouping shapes for assistive access...")
 
         self.remediator.remediate_selective_ungrouping(context, self.current_presentation)
-        return self._finalize_candidate_and_export(context)
+        return self._finalize_candidate_and_export(context, export_suffix="_ungrouping_fixed")
 
     def execute_list_remediation(
         self,
@@ -303,7 +303,7 @@ class AppController:
             progress_callback(1, 2, "Normalizing list semantics and numbering hierarchy...")
 
         self.remediator.remediate_list_semantics(context, self.current_presentation)
-        return self._finalize_candidate_and_export(context)
+        return self._finalize_candidate_and_export(context, export_suffix="_list_semantics_fixed")
 
     def generate_reports(self, context: JobContext) -> JobContext:
         """Explicitly generates or updates audit reports in reports folder and export destination."""
@@ -337,10 +337,11 @@ class AppController:
 
                 if not is_safe_rep:
                     dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
-                    stem = source_p.stem if source_p else "presentation"
+                    raw_stem = source_p.stem if source_p else "presentation"
+                    clean_stem = self.get_clean_stem(raw_stem)
                     final_rep = self.get_collision_safe_path(
                         base_dir=dest_dir,
-                        stem=stem,
+                        stem=clean_stem,
                         suffix="_SlideGuard_Report",
                         ext=".md",
                         forbidden_paths=[source_p] if source_p else None
@@ -378,43 +379,54 @@ class AppController:
 
         return self._finalize_candidate_and_export(context)
 
-    def _export_candidate_pptx(self, context: JobContext):
+    def _export_candidate_pptx(self, context: JobContext, suffix: Optional[str] = None):
         """Safely exports candidate PPTX to output directory with collision avoidance."""
         if context.candidate_file and context.candidate_file.exists():
             try:
                 import shutil
                 source_p = getattr(context, "source_file", None) or context.original_file
                 source_resolved = source_p.resolve() if source_p else None
+                suffix_to_use = suffix or "_SlideGuard_Remediated"
 
-                # Reuse existing final_output_file if set, belongs to this job, and is not the source file
-                final_pptx = context.final_output_file
-                is_safe_pptx = (
-                    final_pptx is not None
-                    and str(final_pptx).strip() != ""
-                    and (source_resolved is None or final_pptx.resolve() != source_resolved)
+                if not hasattr(context, "step_output_files") or not isinstance(context.step_output_files, dict):
+                    context.step_output_files = {}
+
+                existing_for_step = context.step_output_files.get(suffix_to_use)
+                is_safe_existing = (
+                    existing_for_step is not None
+                    and str(existing_for_step).strip() != ""
+                    and (source_resolved is None or existing_for_step.resolve() != source_resolved)
                 )
 
-                if not is_safe_pptx:
+                if is_safe_existing:
+                    final_pptx = existing_for_step
+                else:
                     dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
-                    stem = source_p.stem if source_p else "presentation"
+                    raw_stem = source_p.stem if source_p else "presentation"
+                    clean_stem = self.get_clean_stem(raw_stem)
                     final_pptx = self.get_collision_safe_path(
                         base_dir=dest_dir,
-                        stem=stem,
-                        suffix="_SlideGuard_Remediated",
+                        stem=clean_stem,
+                        suffix=suffix_to_use,
                         ext=".pptx",
                         forbidden_paths=[source_p] if source_p else None
                     )
+                    context.step_output_files[suffix_to_use] = final_pptx
 
                 if source_resolved and final_pptx.resolve() == source_resolved:
                     logger.error("Attempted to overwrite source presentation: %s. Aborting export.", source_p)
                 else:
                     shutil.copy2(context.candidate_file, final_pptx)
                     context.final_output_file = final_pptx
-                    logger.info("Exported production remediated presentation: %s", final_pptx)
+                    logger.info("Exported candidate presentation (%s): %s", suffix_to_use, final_pptx)
             except Exception as e:
                 logger.warning("Intermediate candidate export warning: %s", e)
 
-    def _finalize_candidate_and_export(self, context: JobContext) -> JobContext:
+    def _finalize_candidate_and_export(
+        self,
+        context: JobContext,
+        export_suffix: Optional[str] = None
+    ) -> JobContext:
         """Common candidate verification, structural comparison, QA evaluation, and report export."""
         # Verify candidate output
         if context.candidate_file and context.candidate_file.exists():
@@ -526,27 +538,35 @@ class AppController:
 
         # Phase 11 Production Output Management:
         try:
+            suffix_to_use = export_suffix or "_SlideGuard_Remediated"
             source_p = getattr(context, "source_file", None) or context.original_file
             source_resolved = source_p.resolve() if source_p else None
 
-            # Reuse existing final_output_file if set, belongs to this job, and is not the source file
-            final_pptx = context.final_output_file
-            is_safe_pptx = (
-                final_pptx is not None
-                and str(final_pptx).strip() != ""
-                and (source_resolved is None or final_pptx.resolve() != source_resolved)
+            # Track step output files per suffix to avoid unnecessary numbered duplication during same job re-runs
+            if not hasattr(context, "step_output_files") or not isinstance(context.step_output_files, dict):
+                context.step_output_files = {}
+
+            existing_for_step = context.step_output_files.get(suffix_to_use)
+            is_safe_existing = (
+                existing_for_step is not None
+                and str(existing_for_step).strip() != ""
+                and (source_resolved is None or existing_for_step.resolve() != source_resolved)
             )
 
-            if not is_safe_pptx:
+            if is_safe_existing:
+                final_pptx = existing_for_step
+            else:
                 dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
-                stem = source_p.stem if source_p else "presentation"
+                raw_stem = source_p.stem if source_p else "presentation"
+                clean_stem = self.get_clean_stem(raw_stem)
                 final_pptx = self.get_collision_safe_path(
                     base_dir=dest_dir,
-                    stem=stem,
-                    suffix="_SlideGuard_Remediated",
+                    stem=clean_stem,
+                    suffix=suffix_to_use,
                     ext=".pptx",
                     forbidden_paths=[source_p] if source_p else None
                 )
+                context.step_output_files[suffix_to_use] = final_pptx
 
             if context.candidate_file and context.candidate_file.exists():
                 import shutil
@@ -555,7 +575,14 @@ class AppController:
                 else:
                     shutil.copy2(context.candidate_file, final_pptx)
                     context.final_output_file = final_pptx
-                    logger.info("Exported production remediated presentation: %s", final_pptx)
+                    logger.info("Exported production remediated presentation (%s): %s", suffix_to_use, final_pptx)
+
+            # Reload current_presentation from candidate_file so consecutive manual steps chain cumulatively
+            if context.candidate_file and context.candidate_file.exists():
+                try:
+                    self.current_presentation = self.reader.read(context.candidate_file)
+                except Exception as re_err:
+                    logger.warning("Could not reload candidate presentation in controller: %s", re_err)
 
             # Reuse existing final_report_file if set, belongs to this job, and is not the source file
             final_rep = context.final_report_file
@@ -567,10 +594,11 @@ class AppController:
 
             if not is_safe_rep:
                 dest_dir = source_p.parent if (source_p and source_p.parent.exists()) else context.workspace_dir
-                stem = source_p.stem if source_p else "presentation"
+                raw_stem = source_p.stem if source_p else "presentation"
+                clean_stem = self.get_clean_stem(raw_stem)
                 final_rep = self.get_collision_safe_path(
                     base_dir=dest_dir,
-                    stem=stem,
+                    stem=clean_stem,
                     suffix="_SlideGuard_Report",
                     ext=".md",
                     forbidden_paths=[source_p] if source_p else None
@@ -588,6 +616,19 @@ class AppController:
             logger.warning("Production export non-fatal warning: %s", err)
 
         return context
+
+    @staticmethod
+    def get_clean_stem(stem: str) -> str:
+        """Strips previous remediation suffixes to prevent runaway chaining."""
+        import re
+        clean = (stem or "").strip()
+        pattern = r"(_|\s+)(placeholder_fixed|reading_order_fixed|outline_view_fixed|outline_order_fixed|alt_text_fixed|ungrouping_fixed|list_semantics_fixed|SlideGuard_Remediated)(\s*\(\d+\))?$"
+        while True:
+            sub = re.sub(pattern, "", clean, flags=re.IGNORECASE).strip()
+            if sub == clean or not sub:
+                break
+            clean = sub
+        return clean if clean else stem
 
     @staticmethod
     def get_collision_safe_path(
