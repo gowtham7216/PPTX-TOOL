@@ -182,20 +182,47 @@ class ReadingOrderResolver:
             primary_title_id = sorted_titles[0].shape_id
             content_ids = [primary_title_id] + [sid for sid in content_ids if sid != primary_title_id]
 
-        # 3. Empty Shape Deprioritization & Background Handling (Task 2)
-        # Background canvas shapes and wide banner strips must stay at the bottom of the Z-order so they don't visually cover text
+        # 3. Empty Shape Deprioritization & Background Handling with Visual Occlusion Guard
+        # Background canvas shapes, banners, or shapes that originally sat behind content they overlap with
+        # MUST remain in the background (bg_ids) to prevent visual occlusion (obscuring text).
+        orig_idx_map = {sid: idx for idx, sid in enumerate(original_order)}
         bg_ids = []
         other_decorative_ids = []
+        content_item_objs = [it for it in items if it.shape_id in content_ids]
+
         for s_id in decorative_ids:
             it = next((x for x in items if x.shape_id == s_id), None)
-            if it and (it.width >= slide_w_pt * 0.80):
+            if not it:
+                continue
+
+            # a) Full canvas or wide banner background
+            is_wide_bg = (it.width >= slide_w_pt * 0.80) or (it.height >= slide_h_pt * 0.80)
+
+            # b) Visual Occlusion Guard:
+            # If this decorative/empty shape was originally BEHIND any content shape that it physically overlaps with,
+            # moving it after content would "Bring to Front" and cover the content text.
+            is_underlay_visual = False
+            for c_it in content_item_objs:
+                if orig_idx_map.get(s_id, 0) < orig_idx_map.get(c_it.shape_id, 0):
+                    if self._shapes_overlap(it, c_it):
+                        is_underlay_visual = True
+                        break
+
+            if is_wide_bg or is_underlay_visual:
                 bg_ids.append(s_id)
             else:
                 other_decorative_ids.append(s_id)
 
+        # Preserve original relative Z-order among background shapes
+        bg_ids.sort(key=lambda sid: orig_idx_map.get(sid, 0))
+
         # Place content immediately after background, followed by all other empty decorative shapes
-        # Empty shapes are placed after content so they do not pollute items #1-23 in PowerPoint's Reading Order
         proposed_order = bg_ids + content_ids + other_decorative_ids
+
+        # 4. Universal Visual Occlusion Guard
+        # Guarantee that no shape A that was originally behind text/content shape B and overlaps with B
+        # is placed after B in proposed_order (preventing accidental 'Bring to Front' on background visuals).
+        proposed_order = self._enforce_visual_occlusion_guard(proposed_order, original_order, items)
 
         # Track excluded footers
         for it in items:
@@ -389,4 +416,59 @@ class ReadingOrderResolver:
             return "HIGH"
 
         return "MEDIUM"
+
+    @staticmethod
+    def _shapes_overlap(item1: SemanticItem, item2: SemanticItem, tolerance_pt: float = 2.0) -> bool:
+        """Determines if two shapes have overlapping 2D bounding boxes."""
+        overlap_w = min(item1.right, item2.right) - max(item1.left, item2.left)
+        overlap_h = min(item1.bottom, item2.bottom) - max(item1.top, item2.top)
+        return (overlap_w > tolerance_pt) and (overlap_h > tolerance_pt)
+
+    def _enforce_visual_occlusion_guard(
+        self,
+        proposed_order: List[int],
+        original_order: List[int],
+        items: List[SemanticItem]
+    ) -> List[int]:
+        """
+        Enforces visual occlusion safety:
+        If shape A was originally BEHIND shape B, and shape A overlaps with shape B,
+        and shape B contains text or is a content placeholder, shape A must NEVER
+        be placed after shape B in the shape tree (which would render shape A on top of B).
+        """
+        item_map = {it.shape_id: it for it in items}
+        orig_idx_map = {sid: idx for idx, sid in enumerate(original_order)}
+        adjusted = list(proposed_order)
+
+        changed = True
+        iterations = 0
+        while changed and iterations < 20:
+            changed = False
+            iterations += 1
+            for i in range(len(adjusted)):
+                for j in range(i + 1, len(adjusted)):
+                    s_first = adjusted[i]
+                    s_second = adjusted[j]
+
+                    it_first = item_map.get(s_first)
+                    it_second = item_map.get(s_second)
+
+                    if not it_first or not it_second:
+                        continue
+
+                    # If s_second was originally BEHIND s_first, but is now AFTER s_first in adjusted order:
+                    if orig_idx_map.get(s_second, 0) < orig_idx_map.get(s_first, 0):
+                        has_text = bool((it_first.text_preview or "").strip()) or it_first.is_title or it_first.role in (
+                            SemanticRole.TITLE, SemanticRole.SUBTITLE, SemanticRole.BODY_TEXT,
+                            SemanticRole.CARD_HEADER, SemanticRole.CARD_BODY, SemanticRole.TABLE
+                        )
+                        if has_text and self._shapes_overlap(it_second, it_first):
+                            adjusted.remove(s_second)
+                            adjusted.insert(i, s_second)
+                            changed = True
+                            break
+                if changed:
+                    break
+
+        return adjusted
 

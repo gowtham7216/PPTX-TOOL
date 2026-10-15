@@ -501,3 +501,68 @@ def test_timeline_horizontal_progression_and_decorative_tagging():
     assert title_dec is None, "Title must not be marked decorative"
 
 
+def test_visual_occlusion_guard_prevents_obscuring_text(tmp_path):
+    """
+    Test that an empty visual/graphic shape originally situated behind text and physically
+    overlapping that text is NOT moved in front of the text (preventing visual occlusion),
+    while still being tagged as decorative="1".
+    """
+    prs = Presentation()
+    blank_slide_layout = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(blank_slide_layout)
+
+    # 1. Background Graphic (e.g. 3D sphere graphic or illustration), empty text
+    # Placed at (200, 100, 400, 300)
+    graphic = slide.shapes.add_shape(
+        MSO_SHAPE.OVAL,
+        Inches(2.5), Inches(1.5), Inches(5.0), Inches(4.0)
+    )
+    graphic.name = "Background Graphic Sphere"
+    # Empty text frame
+    graphic.text_frame.text = ""
+
+    # 2. Title Text Box overlapping the graphic
+    # Placed at (1.5, 2.0, 7.0, 2.0) -> overlaps with graphic
+    title_box = slide.shapes.add_textbox(
+        Inches(1.5), Inches(2.0), Inches(7.0), Inches(2.0)
+    )
+    title_box.name = "Slide Title"
+    tf = title_box.text_frame
+    tf.text = "Important Presentation Title"
+
+    # Original Z-order: graphic (z=0), title_box (z=1)
+    slide_w_pt = prs.slide_width.pt
+    slide_h_pt = prs.slide_height.pt
+
+    classifier = SemanticRoleClassifier()
+    raw_shapes = list(slide.shapes)
+    classified = [
+        classifier.classify_shape(s._element, s, slide_h_pt, slide_w_pt, i)
+        for i, s in enumerate(raw_shapes)
+    ]
+
+    resolver = ReadingOrderResolver()
+    res = resolver.resolve_reading_order(
+        slide_number=1,
+        items=classified,
+        slide_w_pt=slide_w_pt,
+        slide_h_pt=slide_h_pt
+    )
+
+    # Graphic MUST be placed before Title in Z-order so it doesn't occlude Title
+    assert res.proposed_order.index(graphic.shape_id) < res.proposed_order.index(title_box.shape_id), (
+        "Visual Occlusion Guard must keep overlapping underlay graphic behind title text"
+    )
+
+    # Execute reordering and verify decorative tag
+    reorderer = XMLReadingOrderReorderer()
+    success, _, resulting_order = reorderer.reorder_sp_tree(slide._element, res.proposed_order)
+    assert success is True
+    assert resulting_order.index(graphic.shape_id) < resulting_order.index(title_box.shape_id)
+
+    # Verify graphic was tagged decorative='1' so screen reader skips it
+    graphic_dec = graphic._element.xpath(".//p:cNvPr")[0].get("decorative")
+    assert graphic_dec == "1", "Underlay visual graphic must be tagged decorative='1'"
+
+
+
