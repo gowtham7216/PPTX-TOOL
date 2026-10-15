@@ -158,9 +158,69 @@ class ReadingOrderResolver:
         # Analyze visual layout structure
         layout = self.layout_analyzer.analyze_layout(items, slide_w_pt, slide_h_pt)
 
-        # 1. Enforce Timeline / Process Flow horizontal progression (Task 1)
-        if layout.detected_layout_type == "TIMELINE_HORIZONTAL":
-            # In horizontal timeline/process flows, sort body content strictly by left coordinate
+        # 1. Enforce Structured Card Layouts & Timeline Flow [Badge -> Header -> Body]
+        from rules.placeholders.classifier import is_numeric_badge
+
+        badges = [
+            it for it in items
+            if it.shape_id in content_ids
+            and not it.is_title
+            and it.role not in (SemanticRole.TITLE, SemanticRole.FOOTER, SemanticRole.SLIDE_NUMBER)
+            and (it.role == SemanticRole.CARD_BADGE or is_numeric_badge(it.text_preview or ""))
+            and (it.width < 120.0 and it.height < 100.0)
+        ]
+
+        if len(badges) >= 2:
+            title_ids = [it.shape_id for it in items if (it.is_title or it.role == SemanticRole.TITLE) and it.shape_id in content_ids]
+            footer_ids = [
+                it.shape_id for it in items
+                if (it.role in (SemanticRole.FOOTER, SemanticRole.SLIDE_NUMBER) or it.top >= slide_h_pt * 0.88)
+                and it.shape_id in content_ids and it.shape_id not in title_ids
+            ]
+
+            x_coords = [b.left for b in badges]
+            y_coords = [b.top for b in badges]
+            is_horizontal = (max(x_coords) - min(x_coords)) > (max(y_coords) - min(y_coords))
+
+            other_content = [
+                it for it in items
+                if it.shape_id in content_ids
+                and it.shape_id not in title_ids
+                and it.shape_id not in footer_ids
+                and it.shape_id not in [b.shape_id for b in badges]
+            ]
+
+            if is_horizontal:
+                badges.sort(key=lambda b: b.left)
+                cards = {b.shape_id: [b] for b in badges}
+                for oc in other_content:
+                    oc_cx = oc.left + oc.width / 2.0
+                    best_b = min(badges, key=lambda b: abs((b.left + b.width / 2.0) - oc_cx))
+                    cards[best_b.shape_id].append(oc)
+            else:
+                badges.sort(key=lambda b: b.top)
+                cards = {b.shape_id: [b] for b in badges}
+                for oc in other_content:
+                    oc_cy = oc.top + oc.height / 2.0
+                    best_b = min(badges, key=lambda b: abs((b.top + b.height / 2.0) - oc_cy))
+                    cards[best_b.shape_id].append(oc)
+
+            card_content_ids = list(title_ids)
+            for b in badges:
+                card_items = cards[b.shape_id]
+                badge_shape = card_items[0]
+                non_badge = card_items[1:]
+                # Sort inside card: Header first (shorter text or higher top), then body (longer text)
+                non_badge.sort(key=lambda it: (0 if len((it.text_preview or "").strip()) < 50 else 1, it.top, it.left))
+                ordered_card = [badge_shape.shape_id] + [it.shape_id for it in non_badge]
+                card_content_ids.extend(ordered_card)
+
+            card_content_ids.extend(footer_ids)
+            content_ids = card_content_ids
+            reasoning.append("Enforced structured card-by-card reading order [Badge -> Header -> Body].")
+
+        elif layout.detected_layout_type == "TIMELINE_HORIZONTAL":
+            # In horizontal timeline/process flows without badges, sort body content strictly by left coordinate
             timeline_items = [
                 it for it in items
                 if it.shape_id in content_ids

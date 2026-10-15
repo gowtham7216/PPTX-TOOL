@@ -91,6 +91,15 @@ class PlaceholderRule(BaseAccessibilityRule):
             skip_empty_text=skip_empty_text
         )
 
+        self.transformer._sort_analyses_by_reading_flow(
+            analyses=analyses,
+            raw_slide=raw_slide,
+            slide_elem=raw_slide._element if hasattr(raw_slide, "_element") else None,
+            slide_number=slide.slide_number,
+            slide_w_pt=slide_w_pt,
+            slide_h_pt=slide_h_pt
+        )
+
         for analysis in analyses:
             extra_data = analysis.to_dict()
 
@@ -117,8 +126,9 @@ class PlaceholderRule(BaseAccessibilityRule):
                 )
 
             # 2. Standalone subtitle text box
-            elif analysis.category == PlaceholderCategory.STANDALONE_SUBTITLE_BOX or (
-                analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type == "subTitle"
+            elif (
+                (analysis.category == PlaceholderCategory.STANDALONE_SUBTITLE_BOX and analysis.proposed_placeholder_type == "subTitle")
+                or (analysis.action == ConversionAction.CONVERT_EXISTING and analysis.proposed_placeholder_type == "subTitle")
             ):
                 issues.append(
                     Issue(

@@ -772,8 +772,20 @@ class PlaceholderClassifier:
                 semantic_role = "GROUP_COMPONENT"
                 conversion_basis = "GROUP_STRUCTURE_PROTECTION"
 
-            # 5. Numeric card badges and design markers: PRESERVED
-            elif sid in badge_ids or is_numeric_badge(text_content) or is_short_label_or_decorative(text_content) or is_caption_or_metadata(text_content):
+            # 5a. Numeric card badges: CONVERT to native content placeholder
+            elif is_numeric_badge(text_content):
+                final_action = ConversionAction.CONVERT_EXISTING
+                final_category = PlaceholderCategory.CARD_BADGE
+                final_status = PlaceholderStatus.SAFE_TO_CONVERT
+                final_rec = "Convert numeric card badge into native slide content placeholder."
+                final_reason = f"Numeric card badge ('{text_content[:20]}') converted to native placeholder for card sequence."
+                final_conf_str = "HIGH"
+                semantic_role = "CARD_BADGE"
+                proposed_ph_type = "body"
+                conversion_basis = "CARD_BADGE_CONVERSION"
+
+            # 5b. Short decorative labels, captions, metadata: PRESERVED
+            elif is_short_label_or_decorative(text_content) or is_caption_or_metadata(text_content) or sid in badge_ids:
                 final_action = ConversionAction.PRESERVE_EXISTING
                 final_category = PlaceholderCategory.CARD_BADGE
                 final_status = PlaceholderStatus.PRESERVED
@@ -795,16 +807,16 @@ class PlaceholderClassifier:
                 proposed_ph_type = "title"
                 conversion_basis = "MULTI_SIGNAL_HEADING"
 
-            # 7. ACTION: CONVERT_EXISTING SUBTITLE
+            # 7. ACTION: CONVERT_EXISTING SUBTITLE (as body placeholder)
             elif sid == promoted_subtitle_shape_id and not has_slide_subtitle:
                 final_action = ConversionAction.CONVERT_EXISTING
                 final_category = PlaceholderCategory.STANDALONE_SUBTITLE_BOX
                 final_status = PlaceholderStatus.SAFE_TO_CONVERT
-                final_rec = "Convert standalone subtitle text box into native slide subtitle placeholder."
-                final_reason = "Slide contains visual subtitle heading below title; converted to native subtitle placeholder."
+                final_rec = "Convert standalone subtitle text box into native slide content placeholder."
+                final_reason = "Slide contains visual subtitle heading below title; converted to native content placeholder."
                 final_conf_str = "HIGH"
                 semantic_role = "SUBTITLE"
-                proposed_ph_type = "subTitle"
+                proposed_ph_type = "body"
                 conversion_basis = "HEADING_HIERARCHY_SUBTITLE"
 
             # 8. ConvertPlaceholder_v2 classified shapes:

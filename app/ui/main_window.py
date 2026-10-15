@@ -990,6 +990,24 @@ class SlideGuardMainWindow:
         )
         self.btn_check_ro.pack(side=tk.LEFT, padx=(0, 8))
 
+        self.btn_fix_ph_batch = tk.Button(
+            action_box,
+            text="🗂 Fix Placeholders (Batch All)",
+            font=("Segoe UI", 9, "bold"),
+            fg=BLUE_PRIMARY,
+            bg=BG_WHITE,
+            activebackground=BG_SURFACE_ALT,
+            activeforeground=BLUE_HOVER,
+            relief=tk.SOLID,
+            bd=1,
+            highlightbackground=BORDER_SUBTLE,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=self._on_apply_placeholders_clicked,
+        )
+        self.btn_fix_ph_batch.pack(side=tk.LEFT, padx=(0, 8))
+
         self.btn_fix_ro = tk.Button(
             action_box,
             text="⚡ Fix Reading Order (Batch All)",
@@ -2018,6 +2036,8 @@ class SlideGuardMainWindow:
         self.job_context.user_approved_remediation = True
         self.is_busy = True
         self.btn_apply_ph.config(state=tk.DISABLED)
+        if hasattr(self, "btn_fix_ph_batch"):
+            self.btn_fix_ph_batch.config(state=tk.DISABLED)
         self.prog_bar["value"] = 0
         self.status_var.set("Converting eligible shapes to native placeholders...")
 
@@ -2038,6 +2058,8 @@ class SlideGuardMainWindow:
                 logger.exception("Placeholder remediation failed: %s", e)
                 self.root.after(0, lambda: setattr(self, "is_busy", False))
                 self.root.after(0, lambda: self.btn_apply_ph.config(state=tk.NORMAL))
+                if hasattr(self, "btn_fix_ph_batch"):
+                    self.root.after(0, lambda: self.btn_fix_ph_batch.config(state=tk.NORMAL))
                 self.root.after(0, lambda: messagebox.showerror("Remediation Error", f"Placeholder conversion failed: {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -2045,6 +2067,8 @@ class SlideGuardMainWindow:
     def _on_placeholders_finished(self):
         self.is_busy = False
         self.btn_apply_ph.config(state=tk.NORMAL)
+        if hasattr(self, "btn_fix_ph_batch"):
+            self.btn_fix_ph_batch.config(state=tk.NORMAL)
         ctx = self.job_context
         applied = sum(1 for a in ctx.remediation_actions if a.rule_id == "SG-PH-01" and a.status == RemediationStatus.APPLIED)
         out_name = ctx.final_output_file.name if ctx.final_output_file else "candidate presentation"

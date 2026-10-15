@@ -118,6 +118,14 @@ class PlaceholderTransformer:
             animation_target_ids=list(anim_targets),
             skip_empty_text=skip_empty_text
         )
+
+        # Sort analyses so Title is #1, followed by card sequence [Badge -> Header -> Body], followed by footers
+        proposed_order = self._sort_analyses_by_reading_flow(
+            analyses=analyses,
+            raw_slide=raw_slide,
+            slide_elem=slide_elem,
+            slide_number=slide_number
+        )
         result.total_placeholders_analyzed = len(analyses)
 
         # 3. Process each candidate
@@ -173,6 +181,14 @@ class PlaceholderTransformer:
                     result.placeholders_preserved += 1
                     result.preserved_shape_ids.append(shape_id)
 
+        # Safely reorder <p:spTree> nodes in-place to match resolved reading sequence
+        if approved_set is None and proposed_order:
+            try:
+                from rules.reading_order.xml_reorderer import XMLReadingOrderReorderer
+                XMLReadingOrderReorderer().reorder_sp_tree(slide_elem, proposed_order)
+            except Exception as e:
+                logger.debug("Optional XML reading order reorderer during placeholder conversion: %s", e)
+
         safe, verify_errors = self.verify_integrity(
             sp_tree=sp_tree,
             original_shape_ids=original_shape_ids,
@@ -210,6 +226,90 @@ class PlaceholderTransformer:
         )
         return result
 
+    def _sort_analyses_by_reading_flow(
+        self,
+        analyses: List[PlaceholderAnalysis],
+        raw_slide=None,
+        slide_elem=None,
+        slide_number: int = 1,
+        slide_w_pt: float = 720.0,
+        slide_h_pt: float = 540.0,
+    ) -> List[int]:
+        """
+        Sorts placeholder analyses into logical reading flow sequence:
+        Title -> Card 1 [Badge -> Header -> Body] -> Card 2 -> Card 3 -> Footer -> Others.
+        Returns proposed_order (List of shape IDs).
+        """
+        proposed_order: List[int] = []
+        try:
+            from rules.reading_order.semantic_classifier import SemanticRoleClassifier
+            from rules.reading_order.order_resolver import ReadingOrderResolver
+
+            ro_classifier = SemanticRoleClassifier()
+            ro_resolver = ReadingOrderResolver()
+
+            items = []
+            if raw_slide is not None and hasattr(raw_slide, "shapes"):
+                for z_idx, shape in enumerate(raw_slide.shapes):
+                    item = ro_classifier.classify_shape(
+                        shape_elem=shape._element,
+                        shape_obj=shape,
+                        slide_h_pt=slide_h_pt,
+                        slide_w_pt=slide_w_pt,
+                        z_order=z_idx,
+                        surrounding_items=items
+                    )
+                    items.append(item)
+                ro_res = ro_resolver.resolve_reading_order(
+                    slide_number=slide_number,
+                    items=items,
+                    slide_w_pt=slide_w_pt,
+                    slide_h_pt=slide_h_pt
+                )
+                if ro_res and ro_res.proposed_order:
+                    proposed_order = ro_res.proposed_order
+                    order_map = {sid: i for i, sid in enumerate(proposed_order)}
+                    analyses.sort(key=lambda a: order_map.get(a.shape_id, 999))
+                    return proposed_order
+        except Exception as e:
+            logger.debug("Could not resolve reading flow via ReadingOrderResolver: %s", e)
+
+        # Fallback sorting heuristic:
+        def _flow_key(a: PlaceholderAnalysis):
+            is_title = (
+                a.is_title
+                or a.category == PlaceholderCategory.STANDALONE_TITLE_BOX
+                or a.proposed_placeholder_type == "title"
+            )
+            if is_title:
+                return (0, 0, 0)
+            is_footer = (a.top_pt >= slide_h_pt * 0.88)
+            if is_footer:
+                return (3, a.top_pt, a.left_pt)
+            return (1, round(a.top_pt / 30.0), a.left_pt)
+
+        analyses.sort(key=_flow_key)
+        return proposed_order
+
+    def _execute_create_new(self, analysis: PlaceholderAnalysis, sp_tree) -> int:
+        """Creates a new shape with placeholder semantics when CREATE_NEW is approved."""
+        all_cnv_ids = [int(v) for v in _safe_xpath(sp_tree, ".//p:cNvPr/@id") if v and v.isdigit()]
+        new_id = max(all_cnv_ids, default=1) + 1
+        name = f"Content Placeholder {analysis.placeholder_idx or 1}"
+        sp = etree.SubElement(sp_tree, cp_v2.qn("p", "sp"))
+        nvSpPr = etree.SubElement(sp, cp_v2.qn("p", "nvSpPr"))
+        cNvPr = etree.SubElement(nvSpPr, cp_v2.qn("p", "cNvPr"), attrib={"id": str(new_id), "name": name})
+        cNvSpPr = etree.SubElement(nvSpPr, cp_v2.qn("p", "cNvSpPr"))
+        nvPr = etree.SubElement(nvSpPr, cp_v2.qn("p", "nvPr"))
+        ph_type = analysis.proposed_placeholder_type or "body"
+        etree.SubElement(nvPr, cp_v2.qn("p", "ph"), attrib={"type": ph_type, "idx": str(analysis.placeholder_idx or 1)})
+        spPr = etree.SubElement(sp, cp_v2.qn("p", "spPr"))
+        txBody = etree.SubElement(sp, cp_v2.qn("p", "txBody"))
+        bodyPr = etree.SubElement(txBody, cp_v2.qn("a", "bodyPr"))
+        lstStyle = etree.SubElement(txBody, cp_v2.qn("a", "lstStyle"))
+        p = etree.SubElement(txBody, cp_v2.qn("a", "p"))
+        return new_id
+
     def _execute_conversion(
         self,
         analysis: PlaceholderAnalysis,
@@ -220,6 +320,9 @@ class PlaceholderTransformer:
         """
         Executes physical XML mutation for an individual approved shape using ConvertPlaceholder_v2 logic.
         """
+        if analysis.action == ConversionAction.CREATE_NEW:
+            return self._execute_create_new(analysis, sp_tree)
+
         shape_elem = analysis.raw_element
         if shape_elem is None:
             raise ValueError(f"Shape {analysis.shape_id} raw_element is None.")
