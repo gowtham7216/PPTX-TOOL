@@ -104,7 +104,24 @@ class DecorativeRule(BaseAccessibilityRule):
                 cnvpr = get_cnvpr_element(child)
                 if cnvpr is not None and cnvpr.get("id") == str(target_id):
                     target_elem = child
+                    cnvpr.set("decorative", "1")
                     cnvpr.set("descr", "")
+                    try:
+                        a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+                        asvg_ns = "http://schemas.microsoft.com/office/drawing/2021/oembed"
+                        ext_lsts = cnvpr.xpath("./a:extLst")
+                        if not ext_lsts:
+                            ext_lst = etree.SubElement(cnvpr, f"{{{a_ns}}}extLst")
+                            ext = etree.SubElement(ext_lst, f"{{{a_ns}}}ext", uri="{D42A27BB-41C6-473E-B192-0536F497A8C8}")
+                            etree.SubElement(ext, f"{{{asvg_ns}}}decorative", val="1")
+                        else:
+                            ext_lst = ext_lsts[0]
+                            existing = ext_lst.xpath(".//*[local-name()='decorative']")
+                            if not existing:
+                                ext = etree.SubElement(ext_lst, f"{{{a_ns}}}ext", uri="{D42A27BB-41C6-473E-B192-0536F497A8C8}")
+                                etree.SubElement(ext, f"{{{asvg_ns}}}decorative", val="1")
+                    except Exception:
+                        pass
                     break
 
             # Update in-memory shape model if present
@@ -118,7 +135,7 @@ class DecorativeRule(BaseAccessibilityRule):
                 rule_id=self.rule_id,
                 slide_number=slide.slide_number,
                 target_shape_id=target_id,
-                description=f"Marked shape {target_id} as decorative in OOXML (descr='').",
+                description=f"Marked shape {target_id} as decorative in OOXML (decorative='1' and descr='').",
                 status=RemediationStatus.APPLIED,
                 confidence=0.98,
                 is_user_approved=True

@@ -155,8 +155,47 @@ class ReadingOrderResolver:
         content_decisions.sort(key=lambda d: d.get("reading_order", 999))
         content_ids = [d["shape_id"] for d in content_decisions]
 
-        # In PowerPoint DrawingML, backgrounds must be at lowest z-order (start of spTree)
-        proposed_order = decorative_ids + content_ids
+        # Analyze visual layout structure
+        layout = self.layout_analyzer.analyze_layout(items, slide_w_pt, slide_h_pt)
+
+        # 1. Enforce Timeline / Process Flow horizontal progression (Task 1)
+        if layout.detected_layout_type == "TIMELINE_HORIZONTAL":
+            # In horizontal timeline/process flows, sort body content strictly by left coordinate
+            timeline_items = [
+                it for it in items
+                if it.shape_id in content_ids
+                and not it.is_title
+                and it.role not in (SemanticRole.TITLE, SemanticRole.FOOTER, SemanticRole.SLIDE_NUMBER)
+                and (it.top < slide_h_pt * 0.88)
+            ]
+            timeline_sorted_ids = [it.shape_id for it in sorted(timeline_items, key=lambda x: x.left)]
+            other_content_ids = [sid for sid in content_ids if sid not in timeline_sorted_ids]
+            title_ids = [it.shape_id for it in items if (it.is_title or it.role == SemanticRole.TITLE) and it.shape_id in content_ids]
+            footer_ids = [sid for sid in other_content_ids if sid not in title_ids]
+            content_ids = title_ids + timeline_sorted_ids + footer_ids
+            reasoning.append("Enforced chronological left-to-right horizontal progression for alternating timeline flow.")
+
+        # 2. Enforce Title 1 at index 0 of the content reading order sequence (Task 3)
+        title_items = [it for it in items if (it.is_title or it.role == SemanticRole.TITLE) and it.shape_id in content_ids]
+        if title_items:
+            sorted_titles = sorted(title_items, key=lambda x: (x.top, x.left))
+            primary_title_id = sorted_titles[0].shape_id
+            content_ids = [primary_title_id] + [sid for sid in content_ids if sid != primary_title_id]
+
+        # 3. Empty Shape Deprioritization & Background Handling (Task 2)
+        # Background canvas shapes and wide banner strips must stay at the bottom of the Z-order so they don't visually cover text
+        bg_ids = []
+        other_decorative_ids = []
+        for s_id in decorative_ids:
+            it = next((x for x in items if x.shape_id == s_id), None)
+            if it and (it.width >= slide_w_pt * 0.80):
+                bg_ids.append(s_id)
+            else:
+                other_decorative_ids.append(s_id)
+
+        # Place content immediately after background, followed by all other empty decorative shapes
+        # Empty shapes are placed after content so they do not pollute items #1-23 in PowerPoint's Reading Order
+        proposed_order = bg_ids + content_ids + other_decorative_ids
 
         # Track excluded footers
         for it in items:
@@ -174,11 +213,10 @@ class ReadingOrderResolver:
         # - HIGH >= 0.85 -> safe auto-reorder eligible
         # - MEDIUM 0.70-0.849 -> manual review unless deterministic rules strongly confirm
         # - LOW < 0.70 -> preserve existing order and flag for review
-        layout = self.layout_analyzer.analyze_layout(items, slide_w_pt, slide_h_pt)
 
         if gemini_conf >= 0.85:
             confidence_tier = "HIGH"
-        elif gemini_conf >= 0.70:
+        elif gemini_conf >= 0.70 or layout.detected_layout_type == "TIMELINE_HORIZONTAL":
             if self._is_layout_strongly_confirmed(items, layout):
                 confidence_tier = "HIGH"
                 reasoning.append("Deterministic layout analysis strongly confirmed semantic hierarchy.")
@@ -312,7 +350,7 @@ class ReadingOrderResolver:
         ]
         if not content_items:
             return True
-        if has_header and len(layout.body_columns) <= 3:
+        if has_header and (layout.detected_layout_type == "TIMELINE_HORIZONTAL" or len(layout.body_columns) <= 3):
             return True
         return False
 

@@ -831,15 +831,25 @@ class PlaceholderClassifier:
                     proposed_ph_type = "tbl"
                     conversion_basis = "V2_TABLE_CLASSIFICATION"
                 elif v2_cls == "body":
-                    final_action = ConversionAction.CONVERT_EXISTING
-                    final_category = PlaceholderCategory.STANDALONE_BODY_BOX
-                    final_status = PlaceholderStatus.SAFE_TO_CONVERT
-                    final_rec = "Convert standalone body text box into native slide body placeholder."
-                    final_reason = "Content text box represents body content; converting to native body placeholder."
-                    final_conf_str = "HIGH"
-                    semantic_role = "BODY"
-                    proposed_ph_type = "body"
-                    conversion_basis = "V2_BODY_CLASSIFICATION"
+                    if is_empty or not has_text or not text_content.strip():
+                        final_action = ConversionAction.PRESERVE_EXISTING
+                        final_category = base_category
+                        final_status = base_status
+                        final_rec = "Preserve empty shape without converting to placeholder."
+                        final_reason = "Shape contains no text; preserved as decorative/non-placeholder."
+                        final_conf_str = "HIGH"
+                        semantic_role = "DECORATIVE"
+                        conversion_basis = "EMPTY_SHAPE_PRESERVATION"
+                    else:
+                        final_action = ConversionAction.CONVERT_EXISTING
+                        final_category = PlaceholderCategory.STANDALONE_BODY_BOX
+                        final_status = PlaceholderStatus.SAFE_TO_CONVERT
+                        final_rec = "Convert standalone body text box into native slide body placeholder."
+                        final_reason = "Content text box represents body content; converting to native body placeholder."
+                        final_conf_str = "HIGH"
+                        semantic_role = "BODY"
+                        proposed_ph_type = "body"
+                        conversion_basis = "V2_BODY_CLASSIFICATION"
                 elif v2_cls == "decorative":
                     final_action = ConversionAction.PRESERVE_EXISTING
                     final_category = base_category

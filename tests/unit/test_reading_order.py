@@ -399,3 +399,105 @@ def test_ch06_slide_1_order_preservation():
     assert shape_5_item.role != SemanticRole.FOOTER
     assert "CHAPTER 6" in shape_5_item.text_preview
 
+
+def test_timeline_horizontal_progression_and_decorative_tagging():
+    """
+    Validates:
+    1. Horizontal progression ordering for alternating timeline cards.
+    2. Title is #1 in content reading order sequence.
+    3. Empty shapes are automatically tagged decorative='1' and placed after content.
+    4. Wide background shapes stay at lowest Z-order so they do not occlude text.
+    """
+    prs = Presentation()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    # 1. Full-slide dark background (empty)
+    bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.33), Inches(7.5))
+    bg.name = "Canvas_Background"
+
+    # 2. Empty decorative divider line
+    div = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(3.5), Inches(0.01), Inches(0.5))
+    div.name = "Divider_Line"
+
+    # 3. Slide Title (placed in the middle of creation order)
+    title = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(12), Inches(1.0))
+    title.text_frame.text = "Project Milestones Timeline"
+    title.name = "Slide_Title"
+
+    # 4. Alternating timeline cards:
+    # Card 1: Top (left=1.0, top=2.0)
+    c1 = slide.shapes.add_textbox(Inches(1.0), Inches(2.0), Inches(2.5), Inches(1.5))
+    c1.text_frame.text = "Phase 1: Kickoff"
+    # Card 2: Bottom (left=3.5, top=4.5)
+    c2 = slide.shapes.add_textbox(Inches(3.5), Inches(4.5), Inches(2.5), Inches(1.5))
+    c2.text_frame.text = "Phase 2: Discovery"
+    # Card 3: Top (left=6.0, top=2.0)
+    c3 = slide.shapes.add_textbox(Inches(6.0), Inches(2.0), Inches(2.5), Inches(1.5))
+    c3.text_frame.text = "Phase 3: Architecture"
+    # Card 4: Bottom (left=8.5, top=4.5)
+    c4 = slide.shapes.add_textbox(Inches(8.5), Inches(4.5), Inches(2.5), Inches(1.5))
+    c4.text_frame.text = "Phase 4: Implementation"
+    # Card 5: Top (left=10.5, top=2.0)
+    c5 = slide.shapes.add_textbox(Inches(10.5), Inches(2.0), Inches(2.5), Inches(1.5))
+    c5.text_frame.text = "Phase 5: Launch"
+
+    # 5. Footer disclaimer at bottom
+    footer = slide.shapes.add_textbox(Inches(0.5), Inches(7.1), Inches(6.0), Inches(0.3))
+    footer.text_frame.text = "Confidential - SlideGuard Strategic Planning"
+
+    # Evaluate with ReadingOrderRule
+    slide_w_pt = 13.33 * 72.0
+    slide_h_pt = 7.5 * 72.0
+
+    classifier = SemanticRoleClassifier()
+    raw_shapes = list(slide.shapes)
+    classified = [
+        classifier.classify_shape(s._element, s, slide_h_pt, slide_w_pt, i)
+        for i, s in enumerate(raw_shapes)
+    ]
+
+    analyzer = LayoutRegionAnalyzer()
+    layout = analyzer.analyze_layout(classified, slide_w_pt, slide_h_pt)
+    assert layout.detected_layout_type == "TIMELINE_HORIZONTAL"
+
+    resolver = ReadingOrderResolver(layout_analyzer=analyzer)
+    res = resolver.resolve_reading_order(
+        slide_number=1,
+        items=classified,
+        slide_w_pt=slide_w_pt,
+        slide_h_pt=slide_h_pt
+    )
+
+    assert res.confidence == "HIGH"
+    assert res.changes_required is True
+
+    # Check proposed order sequence:
+    # bg (background) -> title -> c1 -> c2 -> c3 -> c4 -> c5 -> footer -> div (empty decorative)
+    proposed = res.proposed_order
+    assert proposed[0] == bg.shape_id, "Background must be first in Z-order"
+    assert proposed[1] == title.shape_id, "Title must be #1 in reading order content"
+    assert proposed[2] == c1.shape_id, "Timeline step 1 must be next"
+    assert proposed[3] == c2.shape_id, "Timeline step 2 must be next"
+    assert proposed[4] == c3.shape_id, "Timeline step 3 must be next"
+    assert proposed[5] == c4.shape_id, "Timeline step 4 must be next"
+    assert proposed[6] == c5.shape_id, "Timeline step 5 must be next"
+    assert proposed[7] == footer.shape_id, "Footer content must be placed after timeline"
+    assert proposed[-1] == div.shape_id, "Empty decorative shape must be placed after content"
+
+    # Execute in-place reordering
+    reorderer = XMLReadingOrderReorderer()
+    success, msg, resulting_order = reorderer.reorder_sp_tree(slide._element, proposed)
+    assert success is True
+    assert resulting_order == proposed
+
+    # Verify decorative tag was applied to empty shapes
+    bg_dec = bg._element.xpath(".//p:cNvPr")[0].get("decorative")
+    div_dec = div._element.xpath(".//p:cNvPr")[0].get("decorative")
+    title_dec = title._element.xpath(".//p:cNvPr")[0].get("decorative")
+    assert bg_dec == "1", "Background must have decorative='1'"
+    assert div_dec == "1", "Divider line must have decorative='1'"
+    assert title_dec is None, "Title must not be marked decorative"
+
+

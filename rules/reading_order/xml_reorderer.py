@@ -6,6 +6,7 @@ Preserves all shape IDs, formatting, relationships, and animation targets.
 
 from typing import List, Dict, Any, Tuple, Optional
 import logging
+from lxml import etree
 from pptx_engine.ooxml.xml_utils import find_elements_by_xpath
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,49 @@ class XMLReadingOrderReorderer:
 
     SHAPE_TAGS = ("sp", "grpSp", "pic", "graphicFrame", "cxnSp")
 
+    def _is_empty_shape(self, shape_elem) -> bool:
+        """Returns True if shape contains no non-empty text and is not a picture/table/chart."""
+        tag = shape_elem.tag.split("}")[-1]
+        if tag in ("pic", "graphicFrame", "grpSp"):
+            return False
+        # Do not mark shapes with title/body placeholders as decorative if they have any text
+        ph_elems = shape_elem.xpath(".//p:ph")
+        if ph_elems:
+            ph_type = ph_elems[0].get("type")
+            if ph_type in ("title", "ctrTitle", "body", "subTitle"):
+                texts = [t.text.strip() for t in shape_elem.xpath(".//a:t") if t.text]
+                if texts:
+                    return False
+        texts = [t.text.strip() for t in shape_elem.xpath(".//a:t") if t.text]
+        return len(texts) == 0
+
+    def _mark_as_decorative(self, shape_elem) -> None:
+        """Tags an OOXML shape element as decorative for PowerPoint (decorative='1' + descr='' + extLst)."""
+        try:
+            cnv_prs = shape_elem.xpath(".//p:cNvPr")
+            if not cnv_prs:
+                return
+            cnvpr = cnv_prs[0]
+            cnvpr.set("decorative", "1")
+            cnvpr.set("descr", "")
+
+            # Append modern Office SVG / oembed extension if not already present
+            a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+            asvg_ns = "http://schemas.microsoft.com/office/drawing/2021/oembed"
+            ext_lsts = cnvpr.xpath("./a:extLst")
+            if not ext_lsts:
+                ext_lst = etree.SubElement(cnvpr, f"{{{a_ns}}}extLst")
+                ext = etree.SubElement(ext_lst, f"{{{a_ns}}}ext", uri="{D42A27BB-41C6-473E-B192-0536F497A8C8}")
+                etree.SubElement(ext, f"{{{asvg_ns}}}decorative", val="1")
+            else:
+                ext_lst = ext_lsts[0]
+                existing = ext_lst.xpath(".//*[local-name()='decorative']")
+                if not existing:
+                    ext = etree.SubElement(ext_lst, f"{{{a_ns}}}ext", uri="{D42A27BB-41C6-473E-B192-0536F497A8C8}")
+                    etree.SubElement(ext, f"{{{asvg_ns}}}decorative", val="1")
+        except Exception as e:
+            logger.debug("Could not mark shape as decorative: %s", e)
+
     def reorder_sp_tree(
         self,
         slide_elem,
@@ -26,6 +70,7 @@ class XMLReadingOrderReorderer:
     ) -> Tuple[bool, str, List[int]]:
         """
         Reorders top-level shape elements in slide_elem's <p:spTree> to match proposed_order.
+        Automatically marks empty decorative shapes with PowerPoint OOXML decorative="1".
         Returns: (success: bool, message: str, resulting_order: List[int])
         """
         sp_trees = slide_elem.xpath(".//p:spTree")
@@ -48,6 +93,11 @@ class XMLReadingOrderReorderer:
                     original_shape_elements_list.append((s_id, child))
 
         orig_ids = [s_id for s_id, _ in original_shape_elements_list]
+
+        # Automatically tag empty shapes with PowerPoint OOXML decorative="1" (Task 2)
+        for s_id, elem in original_shape_elements_list:
+            if self._is_empty_shape(elem):
+                self._mark_as_decorative(elem)
 
         if orig_ids == proposed_order:
             logger.info("Current XML order already matches proposed order; no mutation required.")

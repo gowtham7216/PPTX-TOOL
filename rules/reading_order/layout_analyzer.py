@@ -75,7 +75,33 @@ class LayoutRegionAnalyzer:
         if not body_candidates:
             return layout
 
-        # 2. Detect Columns among body candidates
+        # 2. Check if body candidates form a horizontal timeline or alternating process flow
+        timeline_candidates = [
+            it for it in body_candidates
+            if it.top < slide_h_pt * 0.85 and (it.top + it.height) < slide_h_pt * 0.90
+        ]
+        remaining_candidates = [it for it in body_candidates if it not in timeline_candidates]
+        if self._is_horizontal_timeline_or_process(timeline_candidates, slide_w_pt, slide_h_pt):
+            layout.detected_layout_type = "TIMELINE_HORIZONTAL"
+            layout.is_multi_column = True
+            # Sort strictly by horizontal progression (left coordinate) to preserve chronological timeline sequence
+            timeline_items = sorted(timeline_candidates, key=lambda x: x.left)
+            # Append any remaining bottom content items (e.g. disclaimer/footer text)
+            sorted_remaining = sorted(remaining_candidates, key=lambda x: (x.top, x.left))
+            all_ordered_items = timeline_items + sorted_remaining
+            columns = [
+                ColumnRegion(
+                    column_index=idx,
+                    min_x=it.left,
+                    max_x=it.right,
+                    items=[it]
+                )
+                for idx, it in enumerate(all_ordered_items)
+            ]
+            layout.body_columns = columns
+            return layout
+
+        # 3. Detect Columns among body candidates
         # Check horizontal distribution: compute X-overlap or X-clustering
         columns = self._cluster_into_columns(body_candidates, slide_w_pt)
 
@@ -107,6 +133,47 @@ class LayoutRegionAnalyzer:
             layout.body_columns = [col]
 
         return layout
+
+    def _is_horizontal_timeline_or_process(
+        self,
+        items: List[SemanticItem],
+        slide_w_pt: float,
+        slide_h_pt: float
+    ) -> bool:
+        """
+        Detects whether items represent a horizontal timeline, workflow, or process cards.
+        Key criteria:
+        - At least 3 content cards with text
+        - Progressively advancing horizontal centers left-to-right
+        - No substantial vertical stacking between adjacent cards (horizontal overlap <= 40%)
+        - Horizontal span across at least 40% of the slide width
+        """
+        if len(items) < 3:
+            return False
+
+        sorted_by_left = sorted(items, key=lambda x: x.left)
+        centers_x = [it.left + it.width / 2.0 for it in sorted_by_left]
+
+        # Centers must strictly advance left to right
+        if not all(centers_x[i] < centers_x[i+1] for i in range(len(centers_x) - 1)):
+            return False
+
+        # Check for vertical stacking (columns): if any two adjacent cards overlap horizontally > 40%,
+        # they are stacked vertically in a column, not in a horizontal timeline.
+        for i in range(len(sorted_by_left) - 1):
+            c1 = sorted_by_left[i]
+            c2 = sorted_by_left[i + 1]
+            overlap_x = max(0.0, min(c1.right, c2.right) - max(c1.left, c2.left))
+            min_width = min(c1.width, c2.width)
+            if min_width > 0 and (overlap_x / min_width) > 0.40:
+                return False
+
+        min_x = min(it.left for it in items)
+        max_x = max(it.right for it in items)
+        if (max_x - min_x) < slide_w_pt * 0.40:
+            return False
+
+        return True
 
     def _cluster_into_columns(
         self,

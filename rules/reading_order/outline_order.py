@@ -145,12 +145,18 @@ def renumber_slide_outline_order(slide_elem) -> int:
     return counter
 
 
-def fix_outline_order_on_slide(slide_model: SlideModel) -> Tuple[bool, int, List[int], List[int]]:
+def fix_outline_order_on_slide(slide_model: Any) -> Tuple[bool, int, List[int], List[int]]:
     """
-    Checks and fixes outline order on a single SlideModel in memory.
+    Checks and fixes outline order on a single SlideModel or python-pptx Slide in memory.
     Returns: (was_fixed: bool, count_renumbered: int, old_seq: List[int], new_seq: List[int])
     """
-    raw_s = slide_model.raw_slide
+    if hasattr(slide_model, "raw_slide"):
+        raw_s = slide_model.raw_slide
+        slide_num = getattr(slide_model, "slide_number", 0)
+    else:
+        raw_s = slide_model
+        slide_num = 0
+
     if raw_s is None or not hasattr(raw_s, "_element"):
         return False, 0, [], []
 
@@ -161,23 +167,26 @@ def fix_outline_order_on_slide(slide_model: SlideModel) -> Tuple[bool, int, List
         new_seq = get_slide_ph_idx_sequence(elem)
         logger.info(
             "Slide %d: Aligned Outline Order to match Reading Order (%s -> %s, %d placeholders).",
-            slide_model.slide_number, seq, new_seq, count
+            slide_num, seq, new_seq, count
         )
         return True, count, seq, new_seq
 
     return False, 0, seq, seq
 
 
-def fix_outline_order_on_presentation(presentation: PresentationModel) -> Dict[str, Any]:
+def fix_outline_order_on_presentation(presentation: Any) -> Dict[str, Any]:
     """
-    Evaluates and fixes Outline Order across all slides in a PresentationModel in-place.
+    Evaluates and fixes Outline Order across all slides in a PresentationModel
+    or python-pptx Presentation in-place.
     Returns a detailed summary report dictionary.
     """
     fixed_slides: List[Dict[str, Any]] = []
     total_renumbered = 0
-    total_slides = len(presentation.slides)
+    slides = presentation.slides if hasattr(presentation, "slides") else []
+    total_slides = len(slides)
 
-    for slide in presentation.slides:
+    for idx, slide in enumerate(slides, start=1):
+        slide_num = getattr(slide, "slide_number", idx)
         was_fixed, count, old_seq, new_seq = fix_outline_order_on_slide(slide)
         if was_fixed:
             total_renumbered += count

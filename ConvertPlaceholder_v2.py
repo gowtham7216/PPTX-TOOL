@@ -66,7 +66,13 @@ def has_existing_decorative_mark(el):
     PowerPoint's own 'Mark as Decorative' button) before we touched it.
     These are the only shapes we leave alone / skip."""
     nv = get_nv_container(el)
+    if nv is None:
+        return False
     cnvpr = nv.find(qn('p', 'cNvPr'))
+    if cnvpr is None:
+        return False
+    if cnvpr.get('decorative') == '1':
+        return True
     extlst = cnvpr.find(qn('a', 'extLst'))
     if extlst is None:
         return False
